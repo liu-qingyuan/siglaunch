@@ -88,7 +88,8 @@ final class RecognitionDiagnosticsTests: XCTestCase {
         .recognitionFrameCompleted(
           RecognitionFrameCompletion(
             frame: first,
-            diagnosticGesture: diagnostic
+            diagnosticGesture: diagnostic,
+            personalRecognizerResult: .failed
           )
         )
       ),
@@ -110,7 +111,8 @@ final class RecognitionDiagnosticsTests: XCTestCase {
         .recognitionFrameCompleted(
           RecognitionFrameCompletion(
             frame: overwritten,
-            diagnosticGesture: diagnostic
+            diagnosticGesture: diagnostic,
+            personalRecognizerResult: .failed
           )
         )
       ),
@@ -121,7 +123,7 @@ final class RecognitionDiagnosticsTests: XCTestCase {
 
   func testActualFPSUsesOnlyCompletedFramesAndAControllableClock() {
     let clock = TestRecognitionClock(now: 100)
-    let coordinator = makeActiveMonitoringCoordinator(clock: clock.now)
+    let coordinator = makeActiveMonitoringCoordinator(clock: clock)
     let first = frame(1)
     let second = frame(2)
     let diagnostic = DiagnosticGestureResult(
@@ -132,25 +134,33 @@ final class RecognitionDiagnosticsTests: XCTestCase {
     )
 
     _ = coordinator.handle(.recognitionFrameCaptured(first))
-    XCTAssertEqual(clock.readCount, 0, "captured frames do not update actual FPS")
+    XCTAssertEqual(clock.eventCount, 1, "captured frames do not request clock time")
     let firstCompletion = coordinator.handle(
       .recognitionFrameCompleted(
-        RecognitionFrameCompletion(frame: first, diagnosticGesture: diagnostic)
+        RecognitionFrameCompletion(
+          frame: first,
+          diagnosticGesture: diagnostic,
+          personalRecognizerResult: .failed
+        )
       )
     )
     XCTAssertEqual(completedFPS(in: firstCompletion), 0)
-    XCTAssertEqual(clock.readCount, 1)
+    XCTAssertEqual(clock.eventCount, 1)
 
     _ = coordinator.handle(.recognitionFrameCaptured(second))
-    XCTAssertEqual(clock.readCount, 1, "pending frames do not update actual FPS")
+    XCTAssertEqual(clock.eventCount, 1, "pending frames do not request clock time")
     clock.advance(by: 0.1)
     let secondCompletion = coordinator.handle(
       .recognitionFrameCompleted(
-        RecognitionFrameCompletion(frame: second, diagnosticGesture: diagnostic)
+        RecognitionFrameCompletion(
+          frame: second,
+          diagnosticGesture: diagnostic,
+          personalRecognizerResult: .failed
+        )
       )
     )
     XCTAssertEqual(completedFPS(in: secondCompletion) ?? -1, 10, accuracy: 0.001)
-    XCTAssertEqual(clock.readCount, 2)
+    XCTAssertEqual(clock.eventCount, 2)
   }
 
   func testLifecycleTransitionsResetDiagnosticsAndRejectOldCompletions() {
@@ -219,7 +229,8 @@ final class RecognitionDiagnosticsTests: XCTestCase {
           .recognitionFrameCompleted(
             RecognitionFrameCompletion(
               frame: inFlight,
-              diagnosticGesture: diagnostic
+              diagnosticGesture: diagnostic,
+              personalRecognizerResult: .failed
             )
           )
         ),
@@ -391,11 +402,9 @@ final class RecognitionDiagnosticsTests: XCTestCase {
   }
 
   private func makeActiveMonitoringCoordinator(
-    clock: @escaping () -> TimeInterval = {
-      ProcessInfo.processInfo.systemUptime
-    }
+    clock: TestRecognitionClock? = nil
   ) -> LaunchCoordinator {
-    let coordinator = LaunchCoordinator(clock: clock)
+    let coordinator = LaunchCoordinator()
     for event in [
       AppEvent.appLaunched,
       .menuBarApplicationConfigurationCompleted(.succeeded),
@@ -410,24 +419,36 @@ final class RecognitionDiagnosticsTests: XCTestCase {
     ] {
       _ = coordinator.handle(event)
     }
+    if let clock {
+      clock.connect(to: coordinator)
+    } else {
+      _ = coordinator.handle(.recognitionClockRead(0))
+    }
     return coordinator
   }
 }
 
 private final class TestRecognitionClock {
   private(set) var nowValue: TimeInterval
-  private(set) var readCount = 0
+  private(set) var eventCount = 0
+  private weak var coordinator: LaunchCoordinator?
 
   init(now: TimeInterval) {
     nowValue = now
   }
 
-  func now() -> TimeInterval {
-    readCount += 1
-    return nowValue
+  func connect(to coordinator: LaunchCoordinator) {
+    self.coordinator = coordinator
+    sendTimeEvent()
   }
 
   func advance(by interval: TimeInterval) {
     nowValue += interval
+    sendTimeEvent()
+  }
+
+  private func sendTimeEvent() {
+    eventCount += 1
+    _ = coordinator?.handle(.recognitionClockRead(nowValue))
   }
 }

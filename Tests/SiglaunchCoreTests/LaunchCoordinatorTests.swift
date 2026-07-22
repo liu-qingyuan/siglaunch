@@ -275,9 +275,11 @@ final class LaunchCoordinatorTests: XCTestCase {
         [.presentMenu(.pausedMonitoring)]
       ),
       (
-        "resume rechecks authorization before reacquiring the camera",
+        "resume clears evidence and rechecks authorization before capture",
         .resumeMonitoringRequested,
         [
+          .clearRecognitionEvidence,
+          .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
           .presentMenu(.awaitingCameraAuthorization),
           .camera(.requestAuthorization),
         ]

@@ -177,6 +177,23 @@ final class RecognizerTrainingAdapterTests: XCTestCase {
       isDirectory: true
     )
     _ = try await MLModel.load(contentsOf: activeModelURL)
+
+    let classifier = CoreMLPersonalRecognizerClassifier(
+      rootDirectory: workspace.modelStoreDirectory
+    )
+    for label in PoseDatasetLabel.allCases {
+      guard
+        let sample = input.samples.first(where: { $0.label == label }),
+        let image = NSImage(contentsOfFile: sample.imagePath),
+        let cgImage = image.cgImage(forProposedRect: nil, context: nil, hints: nil),
+        let top = try classifier.classify(cgImage).max(by: {
+          $0.confidence < $1.confidence
+        })
+      else {
+        return XCTFail("expected a classified \(label.rawValue) sample")
+      }
+      XCTAssertEqual(top.label, label.rawValue)
+    }
   }
 
   private func makeTrainingInput(samplesPerLabel: Int) -> PoseDatasetTrainingInput {

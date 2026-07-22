@@ -4,6 +4,7 @@ import CoreVideo
 import Foundation
 import ImageIO
 import SiglaunchCore
+import Vision
 import XCTest
 
 @testable import SiglaunchApp
@@ -65,6 +66,264 @@ final class VisionDiagnosticAdapterTests: XCTestCase {
         observedCompletion?.diagnosticGesture.isOpenPalm,
         testCase.openPalm
       )
+    }
+  }
+
+  @MainActor
+  func testRealVisionCropFeedsPersonalRecognizerAndReturnsClassifications() async throws {
+    let classifier = RecordingPersonalRecognizerClassifier(
+      classifications: [
+        PersonalRecognizerClassification(
+          label: "domain_expansion",
+          confidence: 0.9
+        ),
+        PersonalRecognizerClassification(label: "other", confidence: 0.1),
+      ]
+    )
+    let adapter = VisionDiagnosticAdapter(
+      analyzer: VisionPersonalRecognizerAnalyzer(classifier: classifier)
+    )
+    let reference = RecognitionFrameReference(
+      lifecycleID: RecognitionLifecycleID(rawValue: 1),
+      sequenceNumber: 1
+    )
+    adapter.receive(
+      CapturedRecognitionFrame(
+        reference: reference,
+        pixelBuffer: try pixelBuffer(from: loadFixture(named: "open-palm"))
+      )
+    )
+    let completed = expectation(description: "Vision and classifier completed")
+    var observedCompletion: RecognitionFrameCompletion?
+
+    adapter.execute(.analyzeFrame(reference)) { completion in
+      observedCompletion = completion
+      completed.fulfill()
+    }
+    await fulfillment(of: [completed], timeout: 3)
+
+    XCTAssertEqual(classifier.imageSizes, [CGSize(width: 224, height: 224)])
+    XCTAssertEqual(
+      observedCompletion?.personalRecognizerResult,
+      .classified(classifier.classifications)
+    )
+  }
+
+  func testCoreMLModelLoadFailureIsRetriedOnlyAfterReset() throws {
+    var loadAttemptCount = 0
+    let classifier = CoreMLPersonalRecognizerClassifier(
+      rootDirectory: URL(fileURLWithPath: "/missing-model-root"),
+      loadModel: { _ in
+        loadAttemptCount += 1
+        throw FailingPersonalRecognizerError.expected
+      }
+    )
+    let image = try blankImage()
+
+    XCTAssertThrowsError(try classifier.classify(image))
+    XCTAssertThrowsError(try classifier.classify(image))
+    XCTAssertEqual(loadAttemptCount, 1)
+
+    classifier.reset()
+    XCTAssertThrowsError(try classifier.classify(image))
+    XCTAssertEqual(loadAttemptCount, 2)
+  }
+
+  func testResetDoesNotWaitForInFlightModelLoad() throws {
+    let loadStarted = expectation(description: "model load started")
+    let resetFinished = expectation(description: "reset finished")
+    let classificationFinished = expectation(description: "classification finished")
+    let allowLoadToFinish = DispatchSemaphore(value: 0)
+    let classifier = CoreMLPersonalRecognizerClassifier(
+      rootDirectory: URL(fileURLWithPath: "/missing-model-root"),
+      loadModel: { _ in
+        loadStarted.fulfill()
+        allowLoadToFinish.wait()
+        throw FailingPersonalRecognizerError.expected
+      }
+    )
+    let image = try blankImage()
+
+    DispatchQueue.global().async {
+      _ = try? classifier.classify(image)
+      classificationFinished.fulfill()
+    }
+    wait(for: [loadStarted], timeout: 1)
+    DispatchQueue.global().async {
+      classifier.reset()
+      resetFinished.fulfill()
+    }
+
+    let resetResult = XCTWaiter.wait(for: [resetFinished], timeout: 0.1)
+    allowLoadToFinish.signal()
+    wait(for: [classificationFinished], timeout: 1)
+    XCTAssertEqual(resetResult, .completed)
+  }
+
+  @MainActor
+  func testProductionAnalyzerReportsNoHandWithoutClassifying() async throws {
+    let classifier = RecordingPersonalRecognizerClassifier(classifications: [])
+    let adapter = VisionDiagnosticAdapter(
+      analyzer: VisionPersonalRecognizerAnalyzer(classifier: classifier)
+    )
+    let reference = RecognitionFrameReference(
+      lifecycleID: RecognitionLifecycleID(rawValue: 1),
+      sequenceNumber: 1
+    )
+    adapter.receive(
+      CapturedRecognitionFrame(
+        reference: reference,
+        pixelBuffer: try pixelBuffer(from: blankImage())
+      )
+    )
+    let completed = expectation(description: "handless frame completed")
+    var observedCompletion: RecognitionFrameCompletion?
+
+    adapter.execute(.analyzeFrame(reference)) { completion in
+      observedCompletion = completion
+      completed.fulfill()
+    }
+    await fulfillment(of: [completed], timeout: 3)
+
+    XCTAssertEqual(observedCompletion?.diagnosticGesture.handDetection, .notDetected)
+    XCTAssertEqual(observedCompletion?.personalRecognizerResult, .noHandDetected)
+    XCTAssertTrue(classifier.imageSizes.isEmpty)
+  }
+
+  @MainActor
+  func testClassifierFailurePreservesVisionDiagnostics() async throws {
+    let adapter = VisionDiagnosticAdapter(
+      analyzer: VisionPersonalRecognizerAnalyzer(
+        classifier: FailingPersonalRecognizerClassifier()
+      )
+    )
+    let reference = RecognitionFrameReference(
+      lifecycleID: RecognitionLifecycleID(rawValue: 1),
+      sequenceNumber: 1
+    )
+    adapter.receive(
+      CapturedRecognitionFrame(
+        reference: reference,
+        pixelBuffer: try pixelBuffer(from: loadFixture(named: "open-palm"))
+      )
+    )
+    let completed = expectation(description: "failed classification completed")
+    var observedCompletion: RecognitionFrameCompletion?
+
+    adapter.execute(.analyzeFrame(reference)) { completion in
+      observedCompletion = completion
+      completed.fulfill()
+    }
+    await fulfillment(of: [completed], timeout: 3)
+
+    XCTAssertEqual(observedCompletion?.diagnosticGesture.handDetection, .detected)
+    XCTAssertEqual(observedCompletion?.personalRecognizerResult, .failed)
+  }
+
+  @MainActor
+  func testDetectedHandWithoutNormalizedCropReportsFailure() async throws {
+    let classifier = RecordingPersonalRecognizerClassifier(classifications: [])
+    let adapter = VisionDiagnosticAdapter(
+      analyzer: VisionPersonalRecognizerAnalyzer(
+        handCropPath: MissingNormalizedCropPath(),
+        classifier: classifier
+      )
+    )
+    let reference = RecognitionFrameReference(
+      lifecycleID: RecognitionLifecycleID(rawValue: 1),
+      sequenceNumber: 1
+    )
+    adapter.receive(
+      CapturedRecognitionFrame(
+        reference: reference,
+        pixelBuffer: try pixelBuffer(from: loadFixture(named: "open-palm"))
+      )
+    )
+    let completed = expectation(description: "missing crop completed")
+    var observedCompletion: RecognitionFrameCompletion?
+
+    adapter.execute(.analyzeFrame(reference)) { completion in
+      observedCompletion = completion
+      completed.fulfill()
+    }
+    await fulfillment(of: [completed], timeout: 3)
+
+    XCTAssertEqual(observedCompletion?.diagnosticGesture.handDetection, .detected)
+    XCTAssertEqual(observedCompletion?.personalRecognizerResult, .failed)
+    XCTAssertTrue(classifier.imageSizes.isEmpty)
+  }
+
+  @MainActor
+  func testLiveCompiledPersonalRecognizerClassifiesRepresentativeFixturesWhenOptedIn()
+    async throws
+  {
+    let environment = ProcessInfo.processInfo.environment
+    guard environment["SIGLAUNCH_RUN_PERSONAL_RECOGNIZER_FIXTURE"] == "1" else {
+      throw XCTSkip(
+        "Set SIGLAUNCH_RUN_PERSONAL_RECOGNIZER_FIXTURE=1 to use private pose fixtures."
+      )
+    }
+    guard
+      let modelRootPath = environment["SIGLAUNCH_PERSONAL_RECOGNIZER_MODEL_ROOT"],
+      let fixtureRootPath = environment["SIGLAUNCH_PERSONAL_RECOGNIZER_FIXTURE_ROOT"]
+    else {
+      return XCTFail(
+        "Set SIGLAUNCH_PERSONAL_RECOGNIZER_MODEL_ROOT and SIGLAUNCH_PERSONAL_RECOGNIZER_FIXTURE_ROOT."
+      )
+    }
+
+    let adapter = VisionDiagnosticAdapter(
+      analyzer: VisionPersonalRecognizerAnalyzer(
+        classifier: CoreMLPersonalRecognizerClassifier(
+          rootDirectory: URL(
+            fileURLWithPath: modelRootPath,
+            isDirectory: true
+          )
+        )
+      )
+    )
+    let cases: [(name: String, isPoseMatch: Bool)] = [
+      ("positive", true),
+      ("near-miss", false),
+      ("nonmatch", false),
+    ]
+
+    for (index, testCase) in cases.enumerated() {
+      let imageURL = URL(
+        fileURLWithPath: fixtureRootPath,
+        isDirectory: true
+      )
+      .appendingPathComponent(testCase.name)
+      .appendingPathExtension("png")
+      let reference = RecognitionFrameReference(
+        lifecycleID: RecognitionLifecycleID(rawValue: 1),
+        sequenceNumber: UInt64(index + 1)
+      )
+      adapter.receive(
+        CapturedRecognitionFrame(
+          reference: reference,
+          pixelBuffer: try pixelBuffer(from: loadImage(at: imageURL))
+        )
+      )
+      let completed = expectation(description: "\(testCase.name) classified")
+      var observedCompletion: RecognitionFrameCompletion?
+      adapter.execute(.analyzeFrame(reference)) { completion in
+        observedCompletion = completion
+        completed.fulfill()
+      }
+      await fulfillment(of: [completed], timeout: 10)
+
+      guard
+        let result = observedCompletion?.personalRecognizerResult,
+        case .classified(let classifications) = result,
+        let top = classifications.max(by: { $0.confidence < $1.confidence })
+      else {
+        XCTFail("\(testCase.name) did not complete Vision and Core ML classification")
+        continue
+      }
+      let isPoseMatch =
+        top.label == "domain_expansion" && top.confidence >= 0.75
+      XCTAssertEqual(isPoseMatch, testCase.isPoseMatch, testCase.name)
     }
   }
 
@@ -137,20 +396,105 @@ final class VisionDiagnosticAdapterTests: XCTestCase {
     return pixelBuffer
   }
 
+  private func blankImage() throws -> CGImage {
+    guard
+      let context = CGContext(
+        data: nil,
+        width: 512,
+        height: 512,
+        bitsPerComponent: 8,
+        bytesPerRow: 512 * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+      ),
+      let image = context.makeImage()
+    else {
+      throw VisionDiagnosticFixtureError.renderingFailed
+    }
+    return image
+  }
+
   private func loadFixture(named name: String) throws -> CGImage {
     guard
       let url = Bundle.module.url(
         forResource: name,
         withExtension: "png",
         subdirectory: "Fixtures"
-      ) ?? Bundle.module.url(forResource: name, withExtension: "png"),
-      let source = CGImageSourceCreateWithURL(url as CFURL, nil),
-      let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+      ) ?? Bundle.module.url(forResource: name, withExtension: "png")
     else {
       throw VisionDiagnosticFixtureError.unreadable(name)
     }
+    return try loadImage(at: url)
+  }
+
+  private func loadImage(at url: URL) throws -> CGImage {
+    guard
+      let source = CGImageSourceCreateWithURL(url as CFURL, nil),
+      let image = CGImageSourceCreateImageAtIndex(source, 0, nil)
+    else {
+      throw VisionDiagnosticFixtureError.unreadable(url.path)
+    }
     return image
   }
+}
+
+private final class MissingNormalizedCropPath:
+  DetectedHandCropNormalizing,
+  @unchecked Sendable
+{
+  func normalizedCrop(from image: CGImage) throws -> CGImage? {
+    nil
+  }
+
+  func normalizedCrop(
+    from image: CGImage,
+    detectedHand: VNHumanHandPoseObservation
+  ) throws -> CGImage? {
+    nil
+  }
+}
+
+private final class FailingPersonalRecognizerClassifier:
+  PersonalRecognizerClassifying,
+  @unchecked Sendable
+{
+  func classify(_ image: CGImage) throws -> [PersonalRecognizerClassification] {
+    throw FailingPersonalRecognizerError.expected
+  }
+
+  func reset() {}
+}
+
+private enum FailingPersonalRecognizerError: Error {
+  case expected
+}
+
+private final class RecordingPersonalRecognizerClassifier:
+  PersonalRecognizerClassifying,
+  @unchecked Sendable
+{
+  let classifications: [PersonalRecognizerClassification]
+  private let lock = NSLock()
+  private var observedImageSizes: [CGSize] = []
+
+  init(classifications: [PersonalRecognizerClassification]) {
+    self.classifications = classifications
+  }
+
+  var imageSizes: [CGSize] {
+    lock.withLock { observedImageSizes }
+  }
+
+  func classify(_ image: CGImage) throws -> [PersonalRecognizerClassification] {
+    lock.withLock {
+      observedImageSizes.append(
+        CGSize(width: image.width, height: image.height)
+      )
+    }
+    return classifications
+  }
+
+  func reset() {}
 }
 
 private final class ControlledVisionDiagnosticAnalyzer:
@@ -233,8 +577,11 @@ private final class ControlledVisionDiagnosticAnalysis:
     self.owner = owner
   }
 
-  func perform() -> DiagnosticGestureResult {
-    owner.perform(index: index)
+  func perform() -> VisionRecognitionResult {
+    VisionRecognitionResult(
+      diagnosticGesture: owner.perform(index: index),
+      personalRecognizerResult: .failed
+    )
   }
 
   func cancel() {
@@ -245,4 +592,5 @@ private final class ControlledVisionDiagnosticAnalysis:
 private enum VisionDiagnosticFixtureError: Error {
   case unreadable(String)
   case pixelBufferCreationFailed(CVReturn)
+  case renderingFailed
 }

@@ -260,6 +260,7 @@ final class ProductionEffectAdapterTests: XCTestCase {
     }
 
     var observedEffects: [AppEffect] = []
+    var adapterEvents: [AppEvent] = []
     var diagnostics: [RecognitionDiagnostics] = []
     var workflowPresentations: [PrimaryWorkflowPresentation?] = []
     var sendEvent: ((AppEvent) -> Void)!
@@ -268,7 +269,11 @@ final class ProductionEffectAdapterTests: XCTestCase {
       recognizerStore: PersonalRecognizerStore(),
       cameraAdapter: cameraAdapter,
       recognitionAdapter: recognitionAdapter,
-      eventSink: { event in sendEvent(event) },
+      recognitionClock: FixedRecognitionClock(value: 123.5),
+      eventSink: { event in
+        adapterEvents.append(event)
+        sendEvent(event)
+      },
       menuSink: { _ in },
       workflowSink: { workflowPresentations.append($0) },
       recognitionDiagnosticsSink: { diagnostics.append($0) }
@@ -291,10 +296,131 @@ final class ProductionEffectAdapterTests: XCTestCase {
       [.analyzeFrame(frame.reference)]
     )
     XCTAssertEqual(diagnostics.last?.diagnosticGesture, diagnostic)
+    let clockEventIndex = adapterEvents.firstIndex(of: .recognitionClockRead(123.5))
+    let completionEventIndex = adapterEvents.firstIndex {
+      guard case .recognitionFrameCompleted = $0 else { return false }
+      return true
+    }
+    XCTAssertNotNil(clockEventIndex)
+    XCTAssertNotNil(completionEventIndex)
+    if let clockEventIndex, let completionEventIndex {
+      XCTAssertLessThan(clockEventIndex, completionEventIndex)
+    }
     XCTAssertTrue(
       observedEffects.contains(.recognition(.analyzeFrame(frame.reference)))
     )
     XCTAssertTrue(workflowPresentations.isEmpty)
+  }
+
+  func testPoseTriggerRunsPrimaryWorkflowOnceThroughProductionAdapters() throws {
+    let cameraAdapter = FakeCameraAdapter()
+    let diagnostic = DiagnosticGestureResult(
+      handDetection: .detected,
+      recognizedJointCount: 21,
+      extendedFingerCount: 5,
+      isOpenPalm: true
+    )
+    let recognitionAdapter = FakeRecognitionAdapter(
+      diagnostic: diagnostic,
+      classifications: [
+        PersonalRecognizerClassification(
+          label: "domain_expansion",
+          confidence: 0.9
+        ),
+        PersonalRecognizerClassification(label: "other", confidence: 0.1),
+      ]
+    )
+    let configuration = WorkflowConfiguration(
+      workspacePath: "/Users/developer/work/siglaunch",
+      piCommand: ["pi"]
+    )
+    let configurationLoader = FakeWorkflowConfigurationLoader(
+      result: .loaded(configuration)
+    )
+    let ghosttyAdapter = FakeGhosttyPlatformAdapter(
+      resolution: .found(
+        GhosttyApplication(
+          path: "/Applications/Ghostty.app",
+          version: "1.3.0",
+          isRunning: true
+        )
+      ),
+      launchResult: .succeeded,
+      sessionResult: .ready(.reused)
+    )
+    let herdrAdapter = FakeHerdrAgentAdapter(
+      queryResult: .agents([]),
+      focusResult: .succeeded,
+      startResult: .succeeded
+    )
+    let coordinator = LaunchCoordinator()
+    for event in [
+      AppEvent.appLaunched,
+      .menuBarApplicationConfigurationCompleted(.succeeded),
+    ] {
+      _ = coordinator.handle(event)
+    }
+
+    var observedEffects: [AppEffect] = []
+    var progressValues: [DomainExpansionCandidateProgress?] = []
+    var triggerCount = 0
+    var workflowPresentations: [PrimaryWorkflowPresentation?] = []
+    var sendEvent: ((AppEvent) -> Void)!
+    var effectAdapter: ProductionEffectAdapter!
+    effectAdapter = ProductionEffectAdapter(
+      recognizerStore: PersonalRecognizerStore(),
+      cameraAdapter: cameraAdapter,
+      recognitionAdapter: recognitionAdapter,
+      workflowConfigurationStore: configurationLoader,
+      ghosttyPlatformAdapter: ghosttyAdapter,
+      herdrAgentAdapter: herdrAdapter,
+      eventSink: { event in sendEvent(event) },
+      menuSink: { _ in },
+      workflowSink: { workflowPresentations.append($0) },
+      domainExpansionCandidateProgressSink: { progressValues.append($0) },
+      domainExpansionTriggerSink: { triggerCount += 1 }
+    )
+    sendEvent = { event in
+      let effects = coordinator.handle(event)
+      observedEffects.append(contentsOf: effects)
+      for effect in effects {
+        effectAdapter.execute(effect)
+      }
+    }
+
+    sendEvent(.personalRecognizerChecked(.available))
+    for sequenceNumber in 1...4 {
+      cameraAdapter.emit(
+        try makeCapturedFrame(sequenceNumber: UInt64(sequenceNumber))
+      )
+    }
+
+    XCTAssertEqual(
+      progressValues,
+      [
+        DomainExpansionCandidateProgress(poseMatchCount: 1),
+        DomainExpansionCandidateProgress(poseMatchCount: 2),
+        nil,
+      ]
+    )
+    XCTAssertEqual(triggerCount, 1)
+    XCTAssertEqual(
+      observedEffects.filter { $0 == .domainExpansionTriggered }.count,
+      1
+    )
+    XCTAssertEqual(
+      observedEffects.filter { $0 == .loadWorkflowConfiguration }.count,
+      1
+    )
+    XCTAssertEqual(configurationLoader.loadCount, 1)
+    XCTAssertEqual(
+      herdrAdapter.startedConfigurations,
+      [configuration]
+    )
+    XCTAssertEqual(
+      workflowPresentations,
+      [.none, .piAgentStarted]
+    )
   }
 
   func testFakePoseDatasetAdaptersDriveImportThroughCoordinatorLoop() async {
@@ -614,6 +740,14 @@ final class ProductionEffectAdapterTests: XCTestCase {
   }
 }
 
+private struct FixedRecognitionClock: RecognitionClockReading {
+  let value: TimeInterval
+
+  func now() -> TimeInterval {
+    value
+  }
+}
+
 @MainActor
 private enum ProductionEffectAdapterTestError: Error {
   case pixelBufferCreationFailed(CVReturn)
@@ -622,11 +756,16 @@ private enum ProductionEffectAdapterTestError: Error {
 @MainActor
 private final class FakeRecognitionAdapter: RecognitionAdapting {
   let diagnostic: DiagnosticGestureResult
+  let classifications: [PersonalRecognizerClassification]?
   private(set) var receivedFrames: [CapturedRecognitionFrame] = []
   private(set) var executedEffects: [RecognitionEffect] = []
 
-  init(diagnostic: DiagnosticGestureResult) {
+  init(
+    diagnostic: DiagnosticGestureResult,
+    classifications: [PersonalRecognizerClassification]? = nil
+  ) {
     self.diagnostic = diagnostic
+    self.classifications = classifications
   }
 
   func receive(_ frame: CapturedRecognitionFrame) {
@@ -642,7 +781,10 @@ private final class FakeRecognitionAdapter: RecognitionAdapting {
     eventSink(
       RecognitionFrameCompletion(
         frame: reference,
-        diagnosticGesture: diagnostic
+        diagnosticGesture: diagnostic,
+        personalRecognizerResult: classifications.map {
+          .classified($0)
+        } ?? .failed
       )
     )
   }
@@ -805,13 +947,15 @@ private actor FakePoseDatasetPreparer: PoseDatasetPreparing {
 
 private final class FakeWorkflowConfigurationLoader: WorkflowConfigurationLoading {
   let result: WorkflowConfigurationLoadResult
+  private(set) var loadCount = 0
 
   init(result: WorkflowConfigurationLoadResult) {
     self.result = result
   }
 
   func load() -> WorkflowConfigurationLoadResult {
-    result
+    loadCount += 1
+    return result
   }
 }
 

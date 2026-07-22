@@ -13,13 +13,23 @@ protocol RecognitionAdapting: AnyObject {
   func reset()
 }
 
+struct VisionRecognitionResult: Equatable, Sendable {
+  let diagnosticGesture: DiagnosticGestureResult
+  let personalRecognizerResult: PersonalRecognizerInferenceResult
+}
+
 protocol VisionDiagnosticAnalysis: AnyObject, Sendable {
-  func perform() -> DiagnosticGestureResult
+  func perform() -> VisionRecognitionResult
   func cancel()
 }
 
 protocol VisionDiagnosticAnalyzing: Sendable {
   func makeAnalysis(pixelBuffer: CVPixelBuffer) -> any VisionDiagnosticAnalysis
+  func reset()
+}
+
+extension VisionDiagnosticAnalyzing {
+  func reset() {}
 }
 
 final class SerialVisionDiagnosticExecutor: @unchecked Sendable {
@@ -30,7 +40,7 @@ final class SerialVisionDiagnosticExecutor: @unchecked Sendable {
 
   func perform(
     _ analysis: any VisionDiagnosticAnalysis
-  ) async -> DiagnosticGestureResult {
+  ) async -> VisionRecognitionResult {
     await withCheckedContinuation { continuation in
       queue.async {
         continuation.resume(returning: analysis.perform())
@@ -56,7 +66,7 @@ final class VisionDiagnosticAdapter: RecognitionAdapting {
   private var analysisTask: Task<Void, Never>?
 
   init(
-    analyzer: any VisionDiagnosticAnalyzing = VisionHandDiagnosticAnalyzer(),
+    analyzer: any VisionDiagnosticAnalyzing = VisionPersonalRecognizerAnalyzer(),
     executor: SerialVisionDiagnosticExecutor = SerialVisionDiagnosticExecutor()
   ) {
     self.analyzer = analyzer
@@ -87,12 +97,13 @@ final class VisionDiagnosticAdapter: RecognitionAdapting {
       activeAnalysis = analysis
       let executor = executor
       analysisTask = Task { [weak self] in
-        let diagnostic = await executor.perform(analysis)
+        let result = await executor.perform(analysis)
         guard !Task.isCancelled else { return }
         eventSink(
           RecognitionFrameCompletion(
             frame: reference,
-            diagnosticGesture: diagnostic
+            diagnosticGesture: result.diagnosticGesture,
+            personalRecognizerResult: result.personalRecognizerResult
           )
         )
         if self?.activeAnalysis === analysis {
@@ -109,6 +120,7 @@ final class VisionDiagnosticAdapter: RecognitionAdapting {
     activeAnalysis = nil
     analysisTask?.cancel()
     analysisTask = nil
+    analyzer.reset()
   }
 }
 
@@ -156,7 +168,7 @@ final class VisionHandDiagnosticAnalyzer: VisionDiagnosticAnalyzing, @unchecked 
     return request
   }
 
-  private func diagnosticResult(
+  func diagnosticResult(
     from observation: VNHumanHandPoseObservation?
   ) throws -> DiagnosticGestureResult {
     guard let observation else {
@@ -237,20 +249,29 @@ private final class VisionHandDiagnosticAnalysis: VisionDiagnosticAnalysis,
     request.maximumHandCount = 1
   }
 
-  func perform() -> DiagnosticGestureResult {
+  func perform() -> VisionRecognitionResult {
+    let diagnosticGesture: DiagnosticGestureResult
     do {
-      return try analyzer.analyze(
+      diagnosticGesture = try analyzer.analyze(
         pixelBuffer: pixelBuffer,
         request: request
       )
     } catch {
-      return DiagnosticGestureResult(
+      diagnosticGesture = DiagnosticGestureResult(
         handDetection: .analysisFailed,
         recognizedJointCount: 0,
         extendedFingerCount: 0,
         isOpenPalm: false
       )
     }
+    let personalRecognizerResult: PersonalRecognizerInferenceResult =
+      diagnosticGesture.handDetection == .notDetected
+      ? .noHandDetected
+      : .failed
+    return VisionRecognitionResult(
+      diagnosticGesture: diagnosticGesture,
+      personalRecognizerResult: personalRecognizerResult
+    )
   }
 
   func cancel() {

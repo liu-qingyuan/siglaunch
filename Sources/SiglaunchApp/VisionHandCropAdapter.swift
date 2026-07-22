@@ -1,7 +1,14 @@
 import CoreGraphics
 import Vision
 
-final class VisionHandCropAdapter: HandCropNormalizing, @unchecked Sendable {
+protocol DetectedHandCropNormalizing: HandCropNormalizing {
+  func normalizedCrop(
+    from image: CGImage,
+    detectedHand: VNHumanHandPoseObservation
+  ) throws -> CGImage?
+}
+
+final class VisionHandCropAdapter: DetectedHandCropNormalizing, @unchecked Sendable {
   private let outputSize: Int
   private let padding: CGFloat
   private let minimumJointConfidence: VNConfidence
@@ -24,13 +31,17 @@ final class VisionHandCropAdapter: HandCropNormalizing, @unchecked Sendable {
     let handler = VNImageRequestHandler(cgImage: image, orientation: .up)
     try handler.perform([request])
 
-    guard
-      let observation = request.results?.first,
-      let normalizedJointBounds = try handBounds(for: observation)
-    else {
+    guard let observation = request.results?.first else { return nil }
+    return try normalizedCrop(from: image, detectedHand: observation)
+  }
+
+  func normalizedCrop(
+    from image: CGImage,
+    detectedHand observation: VNHumanHandPoseObservation
+  ) throws -> CGImage? {
+    guard let normalizedJointBounds = try handBounds(for: observation) else {
       return nil
     }
-
     let imageBounds = CGRect(x: 0, y: 0, width: image.width, height: image.height)
     let detectedBounds = VNImageRectForNormalizedRect(
       normalizedJointBounds,

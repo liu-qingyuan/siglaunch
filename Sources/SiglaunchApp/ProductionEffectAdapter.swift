@@ -1,5 +1,16 @@
 import AppKit
+import Foundation
 import SiglaunchCore
+
+protocol RecognitionClockReading: Sendable {
+  func now() -> TimeInterval
+}
+
+struct SystemRecognitionClock: RecognitionClockReading {
+  func now() -> TimeInterval {
+    ProcessInfo.processInfo.systemUptime
+  }
+}
 
 enum PrimaryWorkflowPresentation: Equatable {
   case leadingPiAgentFocused
@@ -12,6 +23,7 @@ final class ProductionEffectAdapter {
   private let recognizerStore: any PersonalRecognizerStoring
   private let cameraAdapter: any CameraAdapting
   private let recognitionAdapter: any RecognitionAdapting
+  private let recognitionClock: any RecognitionClockReading
   private let recognizerTrainer: any RecognizerTrainingAdapting
   private let workflowConfigurationStore: any WorkflowConfigurationLoading
   private let ghosttyPlatformAdapter: any GhosttyPlatformAdapting
@@ -22,6 +34,8 @@ final class ProductionEffectAdapter {
   private let menuSink: (MenuPresentation) -> Void
   private let workflowSink: (PrimaryWorkflowPresentation?) -> Void
   private let recognitionDiagnosticsSink: (RecognitionDiagnostics) -> Void
+  private let domainExpansionCandidateProgressSink: (DomainExpansionCandidateProgress?) -> Void
+  private let domainExpansionTriggerSink: () -> Void
   private let poseDatasetSink: (PoseDatasetImportPresentation?) -> Void
   private let recognizerTrainingSink: (RecognizerTrainingPresentation?) -> Void
 
@@ -29,6 +43,7 @@ final class ProductionEffectAdapter {
     recognizerStore: any PersonalRecognizerStoring,
     cameraAdapter: any CameraAdapting = ProductionCameraAdapter(),
     recognitionAdapter: any RecognitionAdapting = VisionDiagnosticAdapter(),
+    recognitionClock: any RecognitionClockReading = SystemRecognitionClock(),
     recognizerTrainer: any RecognizerTrainingAdapting = CreateMLRecognizerTrainingAdapter(),
     workflowConfigurationStore: any WorkflowConfigurationLoading = WorkflowConfigurationStore(),
     ghosttyPlatformAdapter: any GhosttyPlatformAdapting = GhosttyPlatformAdapter(),
@@ -39,12 +54,17 @@ final class ProductionEffectAdapter {
     menuSink: @escaping (MenuPresentation) -> Void,
     workflowSink: @escaping (PrimaryWorkflowPresentation?) -> Void,
     recognitionDiagnosticsSink: @escaping (RecognitionDiagnostics) -> Void = { _ in },
+    domainExpansionCandidateProgressSink: @escaping (DomainExpansionCandidateProgress?) -> Void = {
+      _ in
+    },
+    domainExpansionTriggerSink: @escaping () -> Void = {},
     poseDatasetSink: @escaping (PoseDatasetImportPresentation?) -> Void = { _ in },
     recognizerTrainingSink: @escaping (RecognizerTrainingPresentation?) -> Void = { _ in }
   ) {
     self.recognizerStore = recognizerStore
     self.cameraAdapter = cameraAdapter
     self.recognitionAdapter = recognitionAdapter
+    self.recognitionClock = recognitionClock
     self.recognizerTrainer = recognizerTrainer
     self.workflowConfigurationStore = workflowConfigurationStore
     self.ghosttyPlatformAdapter = ghosttyPlatformAdapter
@@ -55,6 +75,8 @@ final class ProductionEffectAdapter {
     self.menuSink = menuSink
     self.workflowSink = workflowSink
     self.recognitionDiagnosticsSink = recognitionDiagnosticsSink
+    self.domainExpansionCandidateProgressSink = domainExpansionCandidateProgressSink
+    self.domainExpansionTriggerSink = domainExpansionTriggerSink
     self.poseDatasetSink = poseDatasetSink
     self.recognizerTrainingSink = recognizerTrainingSink
   }
@@ -81,7 +103,9 @@ final class ProductionEffectAdapter {
       )
     case .recognition(let recognitionEffect):
       recognitionAdapter.execute(recognitionEffect) { [weak self] completion in
-        self?.eventSink(.recognitionFrameCompleted(completion))
+        guard let self else { return }
+        eventSink(.recognitionClockRead(recognitionClock.now()))
+        eventSink(.recognitionFrameCompleted(completion))
       }
     case .presentMenu(let presentation):
       menuSink(presentation)
@@ -90,6 +114,10 @@ final class ProductionEffectAdapter {
       recognitionDiagnosticsSink(diagnostics)
     case .clearRecognitionEvidence:
       recognitionAdapter.reset()
+    case .presentDomainExpansionCandidateProgress(let progress):
+      domainExpansionCandidateProgressSink(progress)
+    case .domainExpansionTriggered:
+      domainExpansionTriggerSink()
     case .loadWorkflowConfiguration:
       workflowSink(nil)
       eventSink(

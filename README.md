@@ -97,6 +97,21 @@ SIGLAUNCH_RUN_CREATE_ML_SMOKE=1 swift test \
   --filter RecognizerTrainingAdapterTests/testLiveCreateMLArtifactCompilesAndReloadsWhenOptedIn
 ```
 
+The live Personal Recognizer fixture integration is also disabled by default
+because the model and representative hand images are user-specific. Point the
+model root at a directory containing `PersonalRecognizer.mlmodelc`, and provide
+a fixture root containing `positive.png`, `near-miss.png`, and `nonmatch.png`.
+All three images run through the production Vision crop and compiled Core ML
+classifier:
+
+```bash
+SIGLAUNCH_RUN_PERSONAL_RECOGNIZER_FIXTURE=1 \
+SIGLAUNCH_PERSONAL_RECOGNIZER_MODEL_ROOT="$HOME/Library/Application Support/Siglaunch" \
+SIGLAUNCH_PERSONAL_RECOGNIZER_FIXTURE_ROOT="/path/to/private/pose-fixtures" \
+swift test \
+  --filter VisionDiagnosticAdapterTests/testLiveCompiledPersonalRecognizerClassifiesRepresentativeFixturesWhenOptedIn
+```
+
 Gesture Monitoring defaults to `15 FPS`; the menu also offers `10 FPS` and
 `30 FPS`. The camera selects the closest supported rate that does not exceed the
 target. Recognition keeps one in-flight frame and one replaceable latest frame,

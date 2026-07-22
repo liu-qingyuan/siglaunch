@@ -2,6 +2,25 @@ import CoreML
 import Foundation
 import SiglaunchCore
 
+enum PersonalRecognizerStorageLocation {
+  static func defaultRootDirectory(
+    fileManager: FileManager = .default
+  ) -> URL {
+    fileManager.urls(
+      for: .applicationSupportDirectory,
+      in: .userDomainMask
+    )[0]
+    .appendingPathComponent("Siglaunch", isDirectory: true)
+  }
+
+  static func activeModelURL(in rootDirectory: URL) -> URL {
+    rootDirectory.appendingPathComponent(
+      "PersonalRecognizer.mlmodelc",
+      isDirectory: true
+    )
+  }
+}
+
 @MainActor
 protocol PersonalRecognizerStoring: AnyObject {
   var availability: PersonalRecognizerAvailability { get }
@@ -30,10 +49,7 @@ final class PersonalRecognizerStore: PersonalRecognizerStoring {
   private let atomicReplace: AtomicReplace
 
   private var activeModelURL: URL {
-    rootDirectory.appendingPathComponent(
-      "PersonalRecognizer.mlmodelc",
-      isDirectory: true
-    )
+    PersonalRecognizerStorageLocation.activeModelURL(in: rootDirectory)
   }
 
   private var candidatesDirectory: URL {
@@ -51,8 +67,9 @@ final class PersonalRecognizerStore: PersonalRecognizerStoring {
     self.fileManager = fileManager
     self.rootDirectory =
       rootDirectory
-      ?? fileManager.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
-      .appendingPathComponent("Siglaunch", isDirectory: true)
+      ?? PersonalRecognizerStorageLocation.defaultRootDirectory(
+        fileManager: fileManager
+      )
     self.compileModel = compileModel ?? { try await MLModel.compileModel(at: $0) }
     self.validateModel =
       validateModel ?? {

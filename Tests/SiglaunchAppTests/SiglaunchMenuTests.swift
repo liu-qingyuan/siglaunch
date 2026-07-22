@@ -31,6 +31,17 @@ final class SiglaunchMenuTests: XCTestCase {
     )
   }
 
+  func testDomainExpansionCandidateProgressUsesMenuBarIconsOnly() {
+    XCTAssertEqual(
+      DomainExpansionCandidateProgress(poseMatchCount: 1).symbolName,
+      "1.circle.fill"
+    )
+    XCTAssertEqual(
+      DomainExpansionCandidateProgress(poseMatchCount: 2).symbolName,
+      "2.circle.fill"
+    )
+  }
+
   func testTrainingPresentationExposesProgressAndCancellationState() {
     let progress = RecognizerTrainingPresentation.training(
       RecognizerTrainingProgress(completedUnitCount: 42, totalUnitCount: 100)

@@ -155,6 +155,19 @@ struct MenuStatusContent {
   let detail: String?
 }
 
+extension DomainExpansionCandidateProgress {
+  var symbolName: String {
+    switch poseMatchCount {
+    case 1:
+      "1.circle.fill"
+    case 2:
+      "2.circle.fill"
+    default:
+      "viewfinder.circle"
+    }
+  }
+}
+
 extension RecognitionDiagnostics {
   var content: MenuStatusContent {
     MenuStatusContent(
