@@ -28,6 +28,7 @@ final class ProductionEffectAdapter {
   private let workflowConfigurationStore: any WorkflowConfigurationLoading
   private let ghosttyPlatformAdapter: any GhosttyPlatformAdapting
   private let herdrAgentAdapter: any HerdrAgentAdapting
+  private let domainExpansionHUDPresenter: any DomainExpansionHUDPresenting
   private let poseDatasetFolderSelector: any PoseDatasetFolderSelecting
   private let poseDatasetPreparer: any PoseDatasetPreparing
   private let eventSink: (AppEvent) -> Void
@@ -35,7 +36,6 @@ final class ProductionEffectAdapter {
   private let workflowSink: (PrimaryWorkflowPresentation?) -> Void
   private let recognitionDiagnosticsSink: (RecognitionDiagnostics) -> Void
   private let domainExpansionCandidateProgressSink: (DomainExpansionCandidateProgress?) -> Void
-  private let domainExpansionTriggerSink: () -> Void
   private let poseDatasetSink: (PoseDatasetImportPresentation?) -> Void
   private let recognizerTrainingSink: (RecognizerTrainingPresentation?) -> Void
 
@@ -48,6 +48,8 @@ final class ProductionEffectAdapter {
     workflowConfigurationStore: any WorkflowConfigurationLoading = WorkflowConfigurationStore(),
     ghosttyPlatformAdapter: any GhosttyPlatformAdapting = GhosttyPlatformAdapter(),
     herdrAgentAdapter: any HerdrAgentAdapting = HerdrAgentAdapter(),
+    domainExpansionHUDPresenter: any DomainExpansionHUDPresenting =
+      AppKitDomainExpansionHUDAdapter(),
     poseDatasetFolderSelector: any PoseDatasetFolderSelecting = SystemPoseDatasetFolderPicker(),
     poseDatasetPreparer: any PoseDatasetPreparing = PoseDatasetAdapter(),
     eventSink: @escaping (AppEvent) -> Void,
@@ -57,7 +59,6 @@ final class ProductionEffectAdapter {
     domainExpansionCandidateProgressSink: @escaping (DomainExpansionCandidateProgress?) -> Void = {
       _ in
     },
-    domainExpansionTriggerSink: @escaping () -> Void = {},
     poseDatasetSink: @escaping (PoseDatasetImportPresentation?) -> Void = { _ in },
     recognizerTrainingSink: @escaping (RecognizerTrainingPresentation?) -> Void = { _ in }
   ) {
@@ -69,6 +70,7 @@ final class ProductionEffectAdapter {
     self.workflowConfigurationStore = workflowConfigurationStore
     self.ghosttyPlatformAdapter = ghosttyPlatformAdapter
     self.herdrAgentAdapter = herdrAgentAdapter
+    self.domainExpansionHUDPresenter = domainExpansionHUDPresenter
     self.poseDatasetFolderSelector = poseDatasetFolderSelector
     self.poseDatasetPreparer = poseDatasetPreparer
     self.eventSink = eventSink
@@ -76,7 +78,6 @@ final class ProductionEffectAdapter {
     self.workflowSink = workflowSink
     self.recognitionDiagnosticsSink = recognitionDiagnosticsSink
     self.domainExpansionCandidateProgressSink = domainExpansionCandidateProgressSink
-    self.domainExpansionTriggerSink = domainExpansionTriggerSink
     self.poseDatasetSink = poseDatasetSink
     self.recognizerTrainingSink = recognizerTrainingSink
   }
@@ -116,8 +117,10 @@ final class ProductionEffectAdapter {
       recognitionAdapter.reset()
     case .presentDomainExpansionCandidateProgress(let progress):
       domainExpansionCandidateProgressSink(progress)
-    case .domainExpansionTriggered:
-      domainExpansionTriggerSink()
+    case .presentDomainExpansionHUD(let presentationEffect):
+      domainExpansionHUDPresenter.execute(presentationEffect) { [weak self] event in
+        self?.eventSink(.domainExpansionHUD(event))
+      }
     case .loadWorkflowConfiguration:
       workflowSink(nil)
       eventSink(

@@ -6,7 +6,6 @@ final class AppRuntime: ObservableObject {
   @Published private(set) var menuPresentation: MenuPresentation?
   @Published private(set) var recognitionDiagnostics: RecognitionDiagnostics?
   @Published private(set) var domainExpansionCandidateProgress: DomainExpansionCandidateProgress?
-  @Published private(set) var domainExpansionTriggerSequence: UInt64 = 0
   @Published private(set) var primaryWorkflowPresentation: PrimaryWorkflowPresentation?
   @Published private(set) var poseDatasetImportPresentation: PoseDatasetImportPresentation?
   @Published private(set) var recognizerTrainingPresentation: RecognizerTrainingPresentation?
@@ -26,9 +25,6 @@ final class AppRuntime: ObservableObject {
     },
     domainExpansionCandidateProgressSink: { [weak self] progress in
       self?.domainExpansionCandidateProgress = progress
-    },
-    domainExpansionTriggerSink: { [weak self] in
-      self?.domainExpansionTriggerSequence &+= 1
     },
     poseDatasetSink: { [weak self] presentation in
       self?.poseDatasetImportPresentation = presentation

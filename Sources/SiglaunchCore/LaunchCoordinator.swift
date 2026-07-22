@@ -321,6 +321,19 @@ public enum PrimaryWorkflowFailure: Equatable, Sendable {
   case piStartFailed
 }
 
+public enum DomainExpansionHUDPresentationEffect: Equatable, Sendable {
+  case showDomainExpansion
+  case fade
+  case showError(PrimaryWorkflowFailure)
+  case dismiss
+}
+
+public enum DomainExpansionHUDPresentationEvent: Equatable, Sendable {
+  case animationCompleted
+  case presentationFailed(DomainExpansionHUDPresentationEffect)
+  case dismissed
+}
+
 public struct PrimaryWorkflowContext: Equatable, Sendable {
   public let configuration: WorkflowConfiguration
   public let defaultHerdrSession: DefaultHerdrSession
@@ -357,6 +370,7 @@ public enum AppEvent: Equatable, Sendable {
   case pauseMonitoringRequested
   case resumeMonitoringRequested
   case primaryWorkflowRequested
+  case domainExpansionHUD(DomainExpansionHUDPresentationEvent)
   case workflowConfigurationLoadCompleted(WorkflowConfigurationLoadResult)
   case ghosttyResolutionCompleted(GhosttyResolutionResult)
   case ghosttyLaunchCompleted(GhosttyLaunchResult)
@@ -395,7 +409,7 @@ public enum AppEffect: Equatable, Sendable {
   case presentRecognitionDiagnostics(RecognitionDiagnostics)
   case clearRecognitionEvidence
   case presentDomainExpansionCandidateProgress(DomainExpansionCandidateProgress?)
-  case domainExpansionTriggered
+  case presentDomainExpansionHUD(DomainExpansionHUDPresentationEffect)
   case loadWorkflowConfiguration
   case resolveGhostty
   case launchGhostty(at: String)
@@ -505,8 +519,21 @@ public final class LaunchCoordinator {
     case locked(triggeredAt: TimeInterval, absenceSince: TimeInterval?)
   }
 
+  private enum PrimaryWorkflowOutcome {
+    case succeeded
+    case failed(PrimaryWorkflowFailure)
+  }
+
+  private enum DomainExpansionHUDState {
+    case idle
+    case animating(PrimaryWorkflowOutcome?)
+    case waitingForWorkflow
+    case showingError
+  }
+
   private var state: State = .awaitingLaunch
   private var primaryWorkflowState: PrimaryWorkflowState = .idle
+  private var domainExpansionHUDState: DomainExpansionHUDState = .idle
   private var monitoringPoseDatasetState: MonitoringPoseDatasetState = .idle
   private var validatedTrainingInput: PoseDatasetTrainingInput?
   private var targetFrameRate: RecognitionFrameRate = .defaultValue
@@ -527,6 +554,9 @@ public final class LaunchCoordinator {
   public init() {}
 
   public func handle(_ event: AppEvent) -> Effects {
+    if let effects = handleDomainExpansionHUD(event) {
+      return effects
+    }
     if let effects = handleMonitoringPoseDataset(event) {
       return effects
     }
@@ -1446,8 +1476,9 @@ public final class LaunchCoordinator {
         triggeredAt: time,
         absenceSince: nil
       )
+      domainExpansionHUDState = .animating(nil)
       return updateDomainExpansionCandidateProgress(nil)
-        + [.domainExpansionTriggered]
+        + [.presentDomainExpansionHUD(.showDomainExpansion)]
         + startPrimaryWorkflow()
 
     case .locked(let triggeredAt, _):
@@ -1541,6 +1572,59 @@ public final class LaunchCoordinator {
     return [.loadWorkflowConfiguration]
   }
 
+  private func handleDomainExpansionHUD(_ event: AppEvent) -> Effects? {
+    guard case .domainExpansionHUD(let presentationEvent) = event else {
+      return nil
+    }
+
+    switch (domainExpansionHUDState, presentationEvent) {
+    case (.animating(nil), .animationCompleted):
+      domainExpansionHUDState = .waitingForWorkflow
+      return []
+    case (.animating(.some(.succeeded)), .animationCompleted):
+      domainExpansionHUDState = .idle
+      return [.presentDomainExpansionHUD(.fade)]
+    case (.animating(.some(.failed(let failure))), .animationCompleted):
+      domainExpansionHUDState = .showingError
+      return [.presentDomainExpansionHUD(.showError(failure))]
+    case (.showingError, .dismissed):
+      domainExpansionHUDState = .idle
+      return [.presentDomainExpansionHUD(.dismiss)]
+    case (_, .presentationFailed):
+      domainExpansionHUDState = .idle
+      return []
+    default:
+      return []
+    }
+  }
+
+  private func recordDomainExpansionHUDOutcome(
+    _ outcome: PrimaryWorkflowOutcome
+  ) -> Effects {
+    switch domainExpansionHUDState {
+    case .animating:
+      domainExpansionHUDState = .animating(outcome)
+      return []
+    case .waitingForWorkflow:
+      switch outcome {
+      case .succeeded:
+        domainExpansionHUDState = .idle
+        return [.presentDomainExpansionHUD(.fade)]
+      case .failed(let failure):
+        domainExpansionHUDState = .showingError
+        return [.presentDomainExpansionHUD(.showError(failure))]
+      }
+    case .idle, .showingError:
+      return []
+    }
+  }
+
+  private func failPrimaryWorkflow(_ failure: PrimaryWorkflowFailure) -> Effects {
+    primaryWorkflowState = .idle
+    return [.primaryWorkflowFailed(failure)]
+      + recordDomainExpansionHUDOutcome(.failed(failure))
+  }
+
   private func handlePrimaryWorkflow(_ event: AppEvent) -> Effects {
     switch (primaryWorkflowState, event) {
     case (.idle, .primaryWorkflowRequested):
@@ -1558,16 +1642,14 @@ public final class LaunchCoordinator {
       .loadingConfiguration,
       .workflowConfigurationLoadCompleted(.failed(let failure))
     ):
-      primaryWorkflowState = .idle
-      return [.primaryWorkflowFailed(.configuration(failure))]
+      return failPrimaryWorkflow(.configuration(failure))
 
     case (
       .resolvingGhostty(let configuration),
       .ghosttyResolutionCompleted(.found(let ghostty))
     ):
       if let versionFailure = GhosttyVersionPolicy.failure(for: ghostty.version) {
-        primaryWorkflowState = .idle
-        return [.primaryWorkflowFailed(versionFailure)]
+        return failPrimaryWorkflow(versionFailure)
       }
 
       if ghostty.isRunning {
@@ -1579,16 +1661,14 @@ public final class LaunchCoordinator {
       return [.launchGhostty(at: ghostty.path)]
 
     case (.resolvingGhostty, .ghosttyResolutionCompleted(.notInstalled)):
-      primaryWorkflowState = .idle
-      return [.primaryWorkflowFailed(.ghosttyNotInstalled)]
+      return failPrimaryWorkflow(.ghosttyNotInstalled)
 
     case (.launchingGhostty(let configuration), .ghosttyLaunchCompleted(.succeeded)):
       primaryWorkflowState = .ensuringDefaultHerdrSession(configuration)
       return [.ensureDefaultHerdrSession]
 
     case (.launchingGhostty, .ghosttyLaunchCompleted(.failed)):
-      primaryWorkflowState = .idle
-      return [.primaryWorkflowFailed(.ghosttyLaunchFailed)]
+      return failPrimaryWorkflow(.ghosttyLaunchFailed)
 
     case (
       .ensuringDefaultHerdrSession(let configuration),
@@ -1624,12 +1704,10 @@ public final class LaunchCoordinator {
       return [.focusHerdrAgent(paneID: agent.paneID)]
 
     case (.queryingHerdrAgents, .herdrAgentQueryCompleted(.herdrUnavailable)):
-      primaryWorkflowState = .idle
-      return [.primaryWorkflowFailed(.herdrUnavailable)]
+      return failPrimaryWorkflow(.herdrUnavailable)
 
     case (.queryingHerdrAgents, .herdrAgentQueryCompleted(.malformedOutput)):
-      primaryWorkflowState = .idle
-      return [.primaryWorkflowFailed(.malformedHerdrOutput)]
+      return failPrimaryWorkflow(.malformedHerdrOutput)
 
     case (
       .startingPiAgent(let context),
@@ -1637,10 +1715,10 @@ public final class LaunchCoordinator {
     ):
       primaryWorkflowState = .idle
       return [.primaryWorkflowPiAgentStarted(context)]
+        + recordDomainExpansionHUDOutcome(.succeeded)
 
     case (.startingPiAgent, .herdrAgentStartCompleted(.failed)):
-      primaryWorkflowState = .idle
-      return [.primaryWorkflowFailed(.piStartFailed)]
+      return failPrimaryWorkflow(.piStartFailed)
 
     case (
       .focusingHerdrAgent(let context, let agent),
@@ -1651,27 +1729,24 @@ public final class LaunchCoordinator {
         .primaryWorkflowLeadingPiAgentFocused(
           LeadingPiAgentContext(workflow: context, agent: agent)
         )
-      ]
+      ] + recordDomainExpansionHUDOutcome(.succeeded)
 
     case (.focusingHerdrAgent, .herdrAgentFocusCompleted(.failed)):
-      primaryWorkflowState = .idle
-      return [.primaryWorkflowFailed(.herdrUnavailable)]
+      return failPrimaryWorkflow(.herdrUnavailable)
 
     case (
       .ensuringDefaultHerdrSession,
       .defaultHerdrSessionEnsureCompleted(.automationFailed(let failure))
     ):
-      primaryWorkflowState = .idle
       switch failure {
       case .denied:
-        return [.primaryWorkflowFailed(.ghosttyAutomationDenied)]
+        return failPrimaryWorkflow(.ghosttyAutomationDenied)
       case .unavailable:
-        return [.primaryWorkflowFailed(.ghosttyAutomationUnavailable)]
+        return failPrimaryWorkflow(.ghosttyAutomationUnavailable)
       }
 
     case (.ensuringDefaultHerdrSession, .defaultHerdrSessionEnsureCompleted(.herdrUnavailable)):
-      primaryWorkflowState = .idle
-      return [.primaryWorkflowFailed(.herdrUnavailable)]
+      return failPrimaryWorkflow(.herdrUnavailable)
 
     default:
       return []

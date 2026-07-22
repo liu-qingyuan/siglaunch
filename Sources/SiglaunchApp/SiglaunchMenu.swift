@@ -356,7 +356,7 @@ extension PrimaryWorkflowPresentation {
 }
 
 extension PrimaryWorkflowFailure {
-  fileprivate var detail: String {
+  var detail: String {
     switch self {
     case .configuration(.unavailable):
       "Workflow configuration is unavailable."

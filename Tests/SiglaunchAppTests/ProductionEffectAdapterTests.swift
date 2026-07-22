@@ -353,6 +353,7 @@ final class ProductionEffectAdapterTests: XCTestCase {
       focusResult: .succeeded,
       startResult: .succeeded
     )
+    let hudPresenter = FakeDomainExpansionHUDPresenter()
     let coordinator = LaunchCoordinator()
     for event in [
       AppEvent.appLaunched,
@@ -363,7 +364,6 @@ final class ProductionEffectAdapterTests: XCTestCase {
 
     var observedEffects: [AppEffect] = []
     var progressValues: [DomainExpansionCandidateProgress?] = []
-    var triggerCount = 0
     var workflowPresentations: [PrimaryWorkflowPresentation?] = []
     var sendEvent: ((AppEvent) -> Void)!
     var effectAdapter: ProductionEffectAdapter!
@@ -374,11 +374,11 @@ final class ProductionEffectAdapterTests: XCTestCase {
       workflowConfigurationStore: configurationLoader,
       ghosttyPlatformAdapter: ghosttyAdapter,
       herdrAgentAdapter: herdrAdapter,
+      domainExpansionHUDPresenter: hudPresenter,
       eventSink: { event in sendEvent(event) },
       menuSink: { _ in },
       workflowSink: { workflowPresentations.append($0) },
-      domainExpansionCandidateProgressSink: { progressValues.append($0) },
-      domainExpansionTriggerSink: { triggerCount += 1 }
+      domainExpansionCandidateProgressSink: { progressValues.append($0) }
     )
     sendEvent = { event in
       let effects = coordinator.handle(event)
@@ -403,10 +403,11 @@ final class ProductionEffectAdapterTests: XCTestCase {
         nil,
       ]
     )
-    XCTAssertEqual(triggerCount, 1)
+    XCTAssertEqual(hudPresenter.executedEffects, [.showDomainExpansion])
+    hudPresenter.send(.animationCompleted)
     XCTAssertEqual(
-      observedEffects.filter { $0 == .domainExpansionTriggered }.count,
-      1
+      hudPresenter.executedEffects,
+      [.showDomainExpansion, .fade]
     )
     XCTAssertEqual(
       observedEffects.filter { $0 == .loadWorkflowConfiguration }.count,
@@ -421,6 +422,26 @@ final class ProductionEffectAdapterTests: XCTestCase {
       workflowPresentations,
       [.none, .piAgentStarted]
     )
+  }
+
+  func testHUDPresentationEventsReturnThroughCoordinatorSeam() {
+    let hudPresenter = FakeDomainExpansionHUDPresenter()
+    var events: [AppEvent] = []
+    let effectAdapter = ProductionEffectAdapter(
+      recognizerStore: PersonalRecognizerStore(),
+      domainExpansionHUDPresenter: hudPresenter,
+      eventSink: { events.append($0) },
+      menuSink: { _ in },
+      workflowSink: { _ in }
+    )
+
+    effectAdapter.execute(
+      .presentDomainExpansionHUD(.showDomainExpansion)
+    )
+    XCTAssertEqual(hudPresenter.executedEffects, [.showDomainExpansion])
+
+    hudPresenter.send(.animationCompleted)
+    XCTAssertEqual(events, [.domainExpansionHUD(.animationCompleted)])
   }
 
   func testFakePoseDatasetAdaptersDriveImportThroughCoordinatorLoop() async {
@@ -737,6 +758,24 @@ final class ProductionEffectAdapterTests: XCTestCase {
       _ = coordinator.handle(event)
     }
     return coordinator
+  }
+}
+
+@MainActor
+private final class FakeDomainExpansionHUDPresenter: DomainExpansionHUDPresenting {
+  private(set) var executedEffects: [DomainExpansionHUDPresentationEffect] = []
+  private var eventSink: (@MainActor @Sendable (DomainExpansionHUDPresentationEvent) -> Void)?
+
+  func execute(
+    _ effect: DomainExpansionHUDPresentationEffect,
+    eventSink: @escaping @MainActor @Sendable (DomainExpansionHUDPresentationEvent) -> Void
+  ) {
+    executedEffects.append(effect)
+    self.eventSink = eventSink
+  }
+
+  func send(_ event: DomainExpansionHUDPresentationEvent) {
+    eventSink?(event)
   }
 }
 

@@ -30,7 +30,7 @@ final class DomainExpansionTriggerTests: XCTestCase {
           [classification("domain_expansion", 0.8), classification("other", 0.2)],
           [
             .presentDomainExpansionCandidateProgress(nil),
-            .domainExpansionTriggered,
+            .presentDomainExpansionHUD(.showDomainExpansion),
             .loadWorkflowConfiguration,
           ]
         ),
@@ -100,7 +100,9 @@ final class DomainExpansionTriggerTests: XCTestCase {
         testCase.name
       )
       XCTAssertFalse(
-        triggerEffects(in: effects).contains(.domainExpansionTriggered),
+        triggerEffects(in: effects).contains(
+          .presentDomainExpansionHUD(.showDomainExpansion)
+        ),
         testCase.name
       )
     }
@@ -134,7 +136,10 @@ final class DomainExpansionTriggerTests: XCTestCase {
       classifications: qualifiedMatch,
       with: coordinator
     )
-    XCTAssertTrue(triggerEffects(in: ninth).contains(.domainExpansionTriggered))
+    XCTAssertTrue(
+      triggerEffects(in: ninth).contains(
+        .presentDomainExpansionHUD(.showDomainExpansion)
+      ))
   }
 
   func testOnlyFramesWithCompletedClassificationsEnterEvidenceWindow() {
@@ -158,7 +163,10 @@ final class DomainExpansionTriggerTests: XCTestCase {
       classifications: qualifiedMatch,
       with: coordinator
     )
-    XCTAssertTrue(triggerEffects(in: trigger).contains(.domainExpansionTriggered))
+    XCTAssertTrue(
+      triggerEffects(in: trigger).contains(
+        .presentDomainExpansionHUD(.showDomainExpansion)
+      ))
   }
 
   func testRecognitionLifecycleEventsClearEvidenceAndCandidateProgress() {
@@ -243,7 +251,10 @@ final class DomainExpansionTriggerTests: XCTestCase {
       candidateProgress(in: second),
       DomainExpansionCandidateProgress(poseMatchCount: 2)
     )
-    XCTAssertFalse(triggerEffects(in: second).contains(.domainExpansionTriggered))
+    XCTAssertFalse(
+      triggerEffects(in: second).contains(
+        .presentDomainExpansionHUD(.showDomainExpansion)
+      ))
   }
 
   func testLockedPoseStartsOneWorkflowUntilAbsenceAndCooldownPermitRearm() {
@@ -293,7 +304,7 @@ final class DomainExpansionTriggerTests: XCTestCase {
       triggerEffects(in: secondTrigger),
       [
         .presentDomainExpansionCandidateProgress(nil),
-        .domainExpansionTriggered,
+        .presentDomainExpansionHUD(.showDomainExpansion),
         .loadWorkflowConfiguration,
       ]
     )
@@ -470,7 +481,7 @@ final class DomainExpansionTriggerTests: XCTestCase {
     effects.filter { effect in
       switch effect {
       case .presentDomainExpansionCandidateProgress,
-        .domainExpansionTriggered,
+        .presentDomainExpansionHUD,
         .loadWorkflowConfiguration:
         true
       default:
