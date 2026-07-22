@@ -189,7 +189,12 @@ final class HerdrAgentAdapterTests: XCTestCase {
       .menuBarApplicationConfigurationCompleted(.succeeded),
       .personalRecognizerChecked(.available),
       .camera(.authorizationChanged(.authorized)),
-      .camera(.captureStartCompleted(.succeeded)),
+      .camera(
+        .captureStartCompleted(
+          lifecycleID: RecognitionLifecycleID(rawValue: 1),
+          result: .succeeded
+        )
+      ),
       .menuPresented(.activeMonitoring),
       .primaryWorkflowRequested,
       .workflowConfigurationLoadCompleted(

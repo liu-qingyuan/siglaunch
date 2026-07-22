@@ -78,11 +78,17 @@ SIGLAUNCH_RUN_CREATE_ML_SMOKE=1 swift test \
   --filter RecognizerTrainingAdapterTests/testLiveCreateMLArtifactCompilesAndReloadsWhenOptedIn
 ```
 
-The live camera smoke is disabled by default. Run it only from a macOS GUI
-session where camera prompts can be answered; it requests authorization, starts
-the MacBook built-in camera, and releases it before completing:
+Gesture Monitoring defaults to `15 FPS`; the menu also offers `10 FPS` and
+`30 FPS`. The camera selects the closest supported rate that does not exceed the
+target. Recognition keeps one in-flight frame and one replaceable latest frame,
+while menu diagnostics report target, selected capture, and completed recognition
+FPS.
+
+The live camera FPS smoke is disabled by default. Run it only from a macOS GUI
+session where camera prompts can be answered; it verifies the selected rate does
+not exceed `15 FPS`, receives a lifecycle-tagged frame, and releases the camera:
 
 ```bash
 SIGLAUNCH_RUN_CAMERA_SMOKE=1 swift test \
-  --filter CameraAdapterTests/testLiveBuiltInCameraAuthorizationCaptureAndReleaseWhenOptedIn
+  --filter CameraAdapterTests/testLiveBuiltInCameraFrameRateCaptureAndReleaseWhenOptedIn
 ```

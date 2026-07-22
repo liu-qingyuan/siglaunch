@@ -1,6 +1,38 @@
 import SiglaunchCore
 import XCTest
 
+private func captureInterrupted(
+  lifecycleID: UInt64 = 1
+) -> AppEvent {
+  .camera(
+    .captureInterrupted(
+      lifecycleID: RecognitionLifecycleID(rawValue: lifecycleID)
+    )
+  )
+}
+
+private func captureInterruptionEnded(
+  lifecycleID: UInt64 = 1
+) -> AppEvent {
+  .camera(
+    .captureInterruptionEnded(
+      lifecycleID: RecognitionLifecycleID(rawValue: lifecycleID)
+    )
+  )
+}
+
+private func captureStartCompleted(
+  _ result: CameraCaptureStartResult,
+  lifecycleID: UInt64 = 1
+) -> AppEvent {
+  .camera(
+    .captureStartCompleted(
+      lifecycleID: RecognitionLifecycleID(rawValue: lifecycleID),
+      result: result
+    )
+  )
+}
+
 final class LaunchCoordinatorTests: XCTestCase {
   private typealias Step = (name: String, event: AppEvent, effects: Effects)
 
@@ -84,6 +116,7 @@ final class LaunchCoordinatorTests: XCTestCase {
         "availability requests camera authorization without claiming capture",
         .personalRecognizerChecked(.available),
         [
+          .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
           .presentMenu(.awaitingCameraAuthorization),
           .camera(.requestAuthorization),
         ]
@@ -91,11 +124,11 @@ final class LaunchCoordinatorTests: XCTestCase {
       (
         "authorization starts only the built-in camera",
         .camera(.authorizationChanged(.authorized)),
-        [.camera(.startBuiltInCamera)]
+        [startBuiltInCameraEffect()]
       ),
       (
         "capture confirmation enters Active Monitoring",
-        .camera(.captureStartCompleted(.succeeded)),
+        captureStartCompleted(.succeeded),
         [.presentMenu(.activeMonitoring)]
       ),
       (
@@ -128,13 +161,13 @@ final class LaunchCoordinatorTests: XCTestCase {
         "authorization status: \(testCase.status)"
       )
       XCTAssertEqual(
-        coordinator.handle(.camera(.captureStartCompleted(.succeeded))),
+        coordinator.handle(captureStartCompleted(.succeeded)),
         [],
         "unavailable authorization must not accept capture: \(testCase.status)"
       )
       XCTAssertEqual(
         coordinator.handle(.camera(.authorizationChanged(.authorized))),
-        [.camera(.startBuiltInCamera)],
+        [startBuiltInCameraEffect()],
         "a later authorization event should recover: \(testCase.status)"
       )
     }
@@ -146,7 +179,7 @@ final class LaunchCoordinatorTests: XCTestCase {
     )
     XCTAssertEqual(
       pending.handle(.camera(.authorizationChanged(.authorized))),
-      [.camera(.startBuiltInCamera)]
+      [startBuiltInCameraEffect()]
     )
 
     let pausedWhileAwaitingAuthorization = makeCoordinatorAwaitingCameraAuthorization()
@@ -154,6 +187,7 @@ final class LaunchCoordinatorTests: XCTestCase {
       pausedWhileAwaitingAuthorization.handle(.pauseMonitoringRequested),
       [
         .clearRecognitionEvidence,
+        .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
         .presentMenu(.pausedMonitoring),
       ]
     )
@@ -172,13 +206,17 @@ final class LaunchCoordinatorTests: XCTestCase {
     ] {
       let coordinator = makeCoordinatorStartingCamera()
       XCTAssertEqual(
-        coordinator.handle(.camera(.captureStartCompleted(.failed(failure)))),
-        [.presentMenu(.cameraUnavailable(.capture(failure)))],
+        coordinator.handle(captureStartCompleted(.failed(failure))),
+        [
+          .clearRecognitionEvidence,
+          .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
+          .presentMenu(.cameraUnavailable(.capture(failure))),
+        ],
         "capture failure: \(failure)"
       )
       XCTAssertEqual(
         coordinator.handle(.camera(.authorizationChanged(.authorized))),
-        [.camera(.startBuiltInCamera)],
+        [startBuiltInCameraEffect(lifecycleID: 2)],
         "an authorization refresh should retry capture: \(failure)"
       )
     }
@@ -196,6 +234,7 @@ final class LaunchCoordinatorTests: XCTestCase {
         coordinator.handle(.camera(.authorizationChanged(testCase.status))),
         [
           .clearRecognitionEvidence,
+          .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
           .camera(.stopAndReleaseCamera),
           .presentMenu(.cameraUnavailable(testCase.reason)),
         ]
@@ -208,7 +247,7 @@ final class LaunchCoordinatorTests: XCTestCase {
       XCTAssertEqual(coordinator.handle(.camera(.released)), [])
       XCTAssertEqual(
         coordinator.handle(.camera(.authorizationChanged(.authorized))),
-        [.camera(.startBuiltInCamera)]
+        [startBuiltInCameraEffect(lifecycleID: 2)]
       )
     }
   }
@@ -221,6 +260,7 @@ final class LaunchCoordinatorTests: XCTestCase {
         .pauseMonitoringRequested,
         [
           .clearRecognitionEvidence,
+          .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
           .camera(.stopAndReleaseCamera),
         ]
       ),
@@ -245,11 +285,11 @@ final class LaunchCoordinatorTests: XCTestCase {
       (
         "authorized resume reacquires only the built-in camera",
         .camera(.authorizationChanged(.authorized)),
-        [.camera(.startBuiltInCamera)]
+        [startBuiltInCameraEffect(lifecycleID: 2)]
       ),
       (
         "capture confirmation restores Active Monitoring",
-        .camera(.captureStartCompleted(.succeeded)),
+        captureStartCompleted(.succeeded, lifecycleID: 2),
         [.presentMenu(.activeMonitoring)]
       ),
       (
@@ -257,6 +297,7 @@ final class LaunchCoordinatorTests: XCTestCase {
         .quitRequested,
         [
           .clearRecognitionEvidence,
+          .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
           .camera(.stopAndReleaseCamera),
         ]
       ),
@@ -290,21 +331,22 @@ final class LaunchCoordinatorTests: XCTestCase {
     let activeSteps: [Step] = [
       (
         "interruption stops frame delivery and clears recognition evidence",
-        .camera(.captureInterrupted),
+        captureInterrupted(),
         [
           .clearRecognitionEvidence,
+          .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
           .camera(.stopCapture),
           .presentMenu(.captureInterrupted),
         ]
       ),
       (
         "interruption end resumes while the user still wants Active Monitoring",
-        .camera(.captureInterruptionEnded),
-        [.camera(.startBuiltInCamera)]
+        captureInterruptionEnded(),
+        [startBuiltInCameraEffect(lifecycleID: 2)]
       ),
       (
         "resumed capture restores Active Monitoring",
-        .camera(.captureStartCompleted(.succeeded)),
+        captureStartCompleted(.succeeded, lifecycleID: 2),
         [.presentMenu(.activeMonitoring)]
       ),
     ]
@@ -312,9 +354,10 @@ final class LaunchCoordinatorTests: XCTestCase {
 
     let pausedDuringInterruption = makeActiveMonitoringCoordinator()
     XCTAssertEqual(
-      pausedDuringInterruption.handle(.camera(.captureInterrupted)),
+      pausedDuringInterruption.handle(captureInterrupted()),
       [
         .clearRecognitionEvidence,
+        .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
         .camera(.stopCapture),
         .presentMenu(.captureInterrupted),
       ]
@@ -324,7 +367,7 @@ final class LaunchCoordinatorTests: XCTestCase {
       [.camera(.stopAndReleaseCamera)]
     )
     XCTAssertEqual(
-      pausedDuringInterruption.handle(.camera(.captureInterruptionEnded)),
+      pausedDuringInterruption.handle(captureInterruptionEnded()),
       [],
       "interruption end must not override a later Pause request"
     )
@@ -342,6 +385,7 @@ final class LaunchCoordinatorTests: XCTestCase {
         .camera(.systemWillSleep),
         [
           .clearRecognitionEvidence,
+          .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
           .camera(.stopAndReleaseCamera),
           .presentMenu(.captureInterrupted),
         ]
@@ -354,11 +398,11 @@ final class LaunchCoordinatorTests: XCTestCase {
       (
         "release after wake reacquires for the prior Active intent",
         .camera(.released),
-        [.camera(.startBuiltInCamera)]
+        [startBuiltInCameraEffect(lifecycleID: 2)]
       ),
       (
         "reacquired capture restores Active Monitoring",
-        .camera(.captureStartCompleted(.succeeded)),
+        captureStartCompleted(.succeeded, lifecycleID: 2),
         [.presentMenu(.activeMonitoring)]
       ),
     ]
@@ -369,7 +413,7 @@ final class LaunchCoordinatorTests: XCTestCase {
     XCTAssertEqual(wakeAfterRelease.handle(.camera(.released)), [])
     XCTAssertEqual(
       wakeAfterRelease.handle(.camera(.systemDidWake)),
-      [.camera(.startBuiltInCamera)]
+      [startBuiltInCameraEffect(lifecycleID: 2)]
     )
 
     let paused = makeActiveMonitoringCoordinator()
@@ -377,7 +421,10 @@ final class LaunchCoordinatorTests: XCTestCase {
     _ = paused.handle(.camera(.released))
     XCTAssertEqual(
       paused.handle(.camera(.systemWillSleep)),
-      [.clearRecognitionEvidence]
+      [
+        .clearRecognitionEvidence,
+        .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
+      ]
     )
     XCTAssertEqual(
       paused.handle(.camera(.systemDidWake)),
@@ -401,12 +448,13 @@ final class LaunchCoordinatorTests: XCTestCase {
       active.handle(.camera(.cameraSwitchDetected)),
       [
         .clearRecognitionEvidence,
-        .camera(.rebuildBuiltInCamera),
+        .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
+        rebuildBuiltInCameraEffect(),
         .presentMenu(.captureInterrupted),
       ]
     )
     XCTAssertEqual(
-      active.handle(.camera(.captureStartCompleted(.succeeded))),
+      active.handle(captureStartCompleted(.succeeded, lifecycleID: 2)),
       [.presentMenu(.activeMonitoring)]
     )
 
@@ -415,7 +463,10 @@ final class LaunchCoordinatorTests: XCTestCase {
     _ = paused.handle(.camera(.released))
     XCTAssertEqual(
       paused.handle(.camera(.cameraSwitchDetected)),
-      [.clearRecognitionEvidence],
+      [
+        .clearRecognitionEvidence,
+        .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
+      ],
       "a camera switch must not reacquire capture while Paused Monitoring"
     )
   }
@@ -525,6 +576,7 @@ final class LaunchCoordinatorTests: XCTestCase {
         .personalRecognizerReplacementCompleted(.succeeded),
         [
           .clearRecognitionEvidence,
+          .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
           .presentRecognizerTraining(.succeeded),
           .presentMenu(.awaitingCameraAuthorization),
           .camera(.requestAuthorization),
@@ -533,11 +585,11 @@ final class LaunchCoordinatorTests: XCTestCase {
       (
         "authorization acquires the built-in camera only after replacement",
         .camera(.authorizationChanged(.authorized)),
-        [.camera(.startBuiltInCamera)]
+        [startBuiltInCameraEffect()]
       ),
       (
         "capture confirmation enters Active Monitoring",
-        .camera(.captureStartCompleted(.succeeded)),
+        captureStartCompleted(.succeeded),
         [.presentMenu(.activeMonitoring)]
       ),
     ]
@@ -562,6 +614,7 @@ final class LaunchCoordinatorTests: XCTestCase {
           [
             .presentRecognizerTraining(.preparing),
             .clearRecognitionEvidence,
+            .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
             .camera(.stopAndReleaseCamera),
           ]
         )
@@ -670,6 +723,7 @@ final class LaunchCoordinatorTests: XCTestCase {
           effects,
           [
             .clearRecognitionEvidence,
+            .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
             .presentRecognizerTraining(.succeeded),
             .presentMenu(.awaitingCameraAuthorization),
             .camera(.requestAuthorization),
@@ -677,13 +731,14 @@ final class LaunchCoordinatorTests: XCTestCase {
         )
         XCTAssertEqual(
           coordinator.handle(.camera(.authorizationChanged(.authorized))),
-          [.camera(.startBuiltInCamera)]
+          [startBuiltInCameraEffect(lifecycleID: 2)]
         )
       case .pausedMonitoring:
         XCTAssertEqual(
           effects,
           [
             .clearRecognitionEvidence,
+            .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
             .presentRecognizerTraining(.succeeded),
             .presentMenu(.pausedMonitoring),
           ]
@@ -881,6 +936,7 @@ final class LaunchCoordinatorTests: XCTestCase {
           [
             .presentRecognizerTraining(.preparing),
             .clearRecognitionEvidence,
+            .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
             .camera(.stopAndReleaseCamera),
           ]
         )
@@ -1393,6 +1449,30 @@ final class LaunchCoordinatorTests: XCTestCase {
     }
   }
 
+  private func startBuiltInCameraEffect(
+    lifecycleID: UInt64 = 1,
+    targetFrameRate: RecognitionFrameRate = .fps15
+  ) -> AppEffect {
+    .camera(
+      .startBuiltInCamera(
+        targetFrameRate: targetFrameRate,
+        lifecycleID: RecognitionLifecycleID(rawValue: lifecycleID)
+      )
+    )
+  }
+
+  private func rebuildBuiltInCameraEffect(
+    lifecycleID: UInt64 = 2,
+    targetFrameRate: RecognitionFrameRate = .fps15
+  ) -> AppEffect {
+    .camera(
+      .rebuildBuiltInCamera(
+        targetFrameRate: targetFrameRate,
+        lifecycleID: RecognitionLifecycleID(rawValue: lifecycleID)
+      )
+    )
+  }
+
   private func assertEffects(_ steps: [Step], from coordinator: LaunchCoordinator) {
     for step in steps {
       XCTAssertEqual(coordinator.handle(step.event), step.effects, step.name)
@@ -1435,7 +1515,7 @@ final class LaunchCoordinatorTests: XCTestCase {
         .menuBarApplicationConfigurationCompleted(.succeeded),
         .personalRecognizerChecked(.available),
         .camera(.authorizationChanged(.authorized)),
-        .camera(.captureStartCompleted(.succeeded)),
+        captureStartCompleted(.succeeded),
         .menuPresented(.activeMonitoring),
       ]
     )
@@ -1498,7 +1578,7 @@ final class LaunchCoordinatorTests: XCTestCase {
       .personalRecognizerReplacementCompleted(.succeeded)
     )
     _ = coordinator.handle(.camera(.authorizationChanged(.authorized)))
-    _ = coordinator.handle(.camera(.captureStartCompleted(.succeeded)))
+    _ = coordinator.handle(captureStartCompleted(.succeeded))
 
     if priorState == .pausedMonitoring {
       _ = coordinator.handle(.pauseMonitoringRequested)

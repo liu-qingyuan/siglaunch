@@ -4,6 +4,33 @@ import XCTest
 @testable import SiglaunchApp
 
 final class SiglaunchMenuTests: XCTestCase {
+  func testRecognitionDiagnosticsExposeRatesAndJointStatus() {
+    let diagnostics = RecognitionDiagnostics(
+      targetFrameRate: .fps15,
+      captureFramesPerSecond: 12,
+      completedRecognitionFramesPerSecond: 9.75,
+      diagnosticGesture: DiagnosticGestureResult(
+        handDetection: .detected,
+        recognizedJointCount: 21,
+        extendedFingerCount: 5,
+        isOpenPalm: true
+      )
+    )
+
+    XCTAssertEqual(
+      diagnostics.content.detail,
+      "Target: 15 FPS | Capture: 12 FPS | Completed: 9.8 FPS"
+    )
+    XCTAssertEqual(
+      diagnostics.handDetail,
+      "Hand: detected | Joints: 21 | Extended: 5 | Open palm: yes"
+    )
+    XCTAssertEqual(
+      RecognitionFrameRate.allCases,
+      [.fps10, .fps15, .fps30]
+    )
+  }
+
   func testTrainingPresentationExposesProgressAndCancellationState() {
     let progress = RecognizerTrainingPresentation.training(
       RecognizerTrainingProgress(completedUnitCount: 42, totalUnitCount: 100)

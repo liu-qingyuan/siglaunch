@@ -34,12 +34,127 @@ public enum CameraUnavailableReason: Equatable, Sendable {
   case capture(CameraCaptureFailure)
 }
 
+public enum RecognitionFrameRate: Int, CaseIterable, Equatable, Sendable {
+  case fps10 = 10
+  case fps15 = 15
+  case fps30 = 30
+
+  public static let defaultValue: RecognitionFrameRate = .fps15
+}
+
+public struct RecognitionLifecycleID: Equatable, Hashable, Sendable {
+  public let rawValue: UInt64
+
+  public init(rawValue: UInt64) {
+    self.rawValue = rawValue
+  }
+}
+
+public struct RecognitionFrameReference: Equatable, Hashable, Sendable {
+  public let lifecycleID: RecognitionLifecycleID
+  public let sequenceNumber: UInt64
+
+  public init(lifecycleID: RecognitionLifecycleID, sequenceNumber: UInt64) {
+    self.lifecycleID = lifecycleID
+    self.sequenceNumber = sequenceNumber
+  }
+}
+
+public struct RecognitionFrameRateSelection: Equatable, Sendable {
+  public let lifecycleID: RecognitionLifecycleID
+  public let targetFrameRate: RecognitionFrameRate
+  public let actualFramesPerSecond: Double
+
+  public init(
+    lifecycleID: RecognitionLifecycleID,
+    targetFrameRate: RecognitionFrameRate,
+    actualFramesPerSecond: Double
+  ) {
+    self.lifecycleID = lifecycleID
+    self.targetFrameRate = targetFrameRate
+    self.actualFramesPerSecond = actualFramesPerSecond
+  }
+}
+
+public enum DiagnosticHandDetection: Equatable, Sendable {
+  case detected
+  case notDetected
+  case analysisFailed
+}
+
+public struct DiagnosticGestureResult: Equatable, Sendable {
+  public let handDetection: DiagnosticHandDetection
+  public let recognizedJointCount: Int
+  public let extendedFingerCount: Int
+  public let isOpenPalm: Bool
+
+  public init(
+    handDetection: DiagnosticHandDetection,
+    recognizedJointCount: Int,
+    extendedFingerCount: Int,
+    isOpenPalm: Bool
+  ) {
+    self.handDetection = handDetection
+    self.recognizedJointCount = recognizedJointCount
+    self.extendedFingerCount = extendedFingerCount
+    self.isOpenPalm = isOpenPalm
+  }
+}
+
+/// Emitted only after every configured recognition stage finishes for a frame.
+public struct RecognitionFrameCompletion: Equatable, Sendable {
+  public let frame: RecognitionFrameReference
+  public let diagnosticGesture: DiagnosticGestureResult
+
+  public init(
+    frame: RecognitionFrameReference,
+    diagnosticGesture: DiagnosticGestureResult
+  ) {
+    self.frame = frame
+    self.diagnosticGesture = diagnosticGesture
+  }
+}
+
+public struct RecognitionDiagnostics: Equatable, Sendable {
+  public let targetFrameRate: RecognitionFrameRate
+  public let captureFramesPerSecond: Double?
+  public let completedRecognitionFramesPerSecond: Double
+  public let diagnosticGesture: DiagnosticGestureResult?
+
+  public init(
+    targetFrameRate: RecognitionFrameRate,
+    captureFramesPerSecond: Double?,
+    completedRecognitionFramesPerSecond: Double,
+    diagnosticGesture: DiagnosticGestureResult?
+  ) {
+    self.targetFrameRate = targetFrameRate
+    self.captureFramesPerSecond = captureFramesPerSecond
+    self.completedRecognitionFramesPerSecond = completedRecognitionFramesPerSecond
+    self.diagnosticGesture = diagnosticGesture
+  }
+
+  public static func initial(
+    targetFrameRate: RecognitionFrameRate
+  ) -> RecognitionDiagnostics {
+    RecognitionDiagnostics(
+      targetFrameRate: targetFrameRate,
+      captureFramesPerSecond: nil,
+      completedRecognitionFramesPerSecond: 0,
+      diagnosticGesture: nil
+    )
+  }
+}
+
 public enum CameraEvent: Equatable, Sendable {
   case authorizationChanged(CameraAuthorizationStatus)
-  case captureStartCompleted(CameraCaptureStartResult)
+  case captureStartCompleted(
+    lifecycleID: RecognitionLifecycleID,
+    result: CameraCaptureStartResult
+  )
+  case recognitionFrameRateSelected(RecognitionFrameRateSelection)
   case released
-  case captureInterrupted
-  case captureInterruptionEnded
+  case captureInterrupted(lifecycleID: RecognitionLifecycleID)
+  case captureInterruptionEnded(lifecycleID: RecognitionLifecycleID)
   case systemWillSleep
   case systemDidWake
   case cameraSwitchDetected
@@ -47,10 +162,25 @@ public enum CameraEvent: Equatable, Sendable {
 
 public enum CameraEffect: Equatable, Sendable {
   case requestAuthorization
-  case startBuiltInCamera
+  case startBuiltInCamera(
+    targetFrameRate: RecognitionFrameRate,
+    lifecycleID: RecognitionLifecycleID
+  )
+  case updateRecognitionFrameRate(
+    targetFrameRate: RecognitionFrameRate,
+    lifecycleID: RecognitionLifecycleID
+  )
   case stopCapture
   case stopAndReleaseCamera
-  case rebuildBuiltInCamera
+  case rebuildBuiltInCamera(
+    targetFrameRate: RecognitionFrameRate,
+    lifecycleID: RecognitionLifecycleID
+  )
+}
+
+public enum RecognitionEffect: Equatable, Sendable {
+  case analyzeFrame(RecognitionFrameReference)
+  case discardFrame(RecognitionFrameReference)
 }
 
 public struct WorkflowConfiguration: Equatable, Sendable {
@@ -185,6 +315,9 @@ public enum AppEvent: Equatable, Sendable {
   case menuBarApplicationConfigurationCompleted(MenuBarApplicationConfigurationResult)
   case personalRecognizerChecked(PersonalRecognizerAvailability)
   case camera(CameraEvent)
+  case recognitionFrameRateRequested(RecognitionFrameRate)
+  case recognitionFrameCaptured(RecognitionFrameReference)
+  case recognitionFrameCompleted(RecognitionFrameCompletion)
   case menuPresented(MenuPresentation)
   case pauseMonitoringRequested
   case resumeMonitoringRequested
@@ -221,7 +354,9 @@ public enum AppEffect: Equatable, Sendable {
   case configureMenuBarApplication
   case checkPersonalRecognizer
   case camera(CameraEffect)
+  case recognition(RecognitionEffect)
   case presentMenu(MenuPresentation)
+  case presentRecognitionDiagnostics(RecognitionDiagnostics)
   case clearRecognitionEvidence
   case loadWorkflowConfiguration
   case resolveGhostty
@@ -325,12 +460,29 @@ public final class LaunchCoordinator {
     case focusingHerdrAgent(PrimaryWorkflowContext, HerdrAgent)
   }
 
+  private let recognitionClock: () -> TimeInterval
   private var state: State = .awaitingLaunch
   private var primaryWorkflowState: PrimaryWorkflowState = .idle
   private var monitoringPoseDatasetState: MonitoringPoseDatasetState = .idle
   private var validatedTrainingInput: PoseDatasetTrainingInput?
+  private var targetFrameRate: RecognitionFrameRate = .defaultValue
+  private var recognitionLifecycleSequence: UInt64 = 0
+  private var currentRecognitionLifecycleID: RecognitionLifecycleID?
+  private var currentCameraLifecycleID: RecognitionLifecycleID?
+  private var selectedCaptureFramesPerSecond: Double?
+  private var inFlightRecognitionFrame: RecognitionFrameReference?
+  private var pendingRecognitionFrame: RecognitionFrameReference?
+  private var latestDiagnosticGesture: DiagnosticGestureResult?
+  private var recognitionCompletionTimes: [TimeInterval] = []
+  private var completedRecognitionFramesPerSecond: Double = 0
 
-  public init() {}
+  public init(
+    clock: @escaping () -> TimeInterval = {
+      ProcessInfo.processInfo.systemUptime
+    }
+  ) {
+    recognitionClock = clock
+  }
 
   public func handle(_ event: AppEvent) -> Effects {
     if let effects = handleMonitoringPoseDataset(event) {
@@ -352,6 +504,9 @@ public final class LaunchCoordinator {
     case (.checkingPersonalRecognizer, .personalRecognizerChecked(.available)):
       state = .monitoring(.awaitingAuthorization)
       return [
+        .presentRecognitionDiagnostics(
+          .initial(targetFrameRate: targetFrameRate)
+        ),
         .presentMenu(.awaitingCameraAuthorization),
         .camera(.requestAuthorization),
       ]
@@ -365,7 +520,7 @@ public final class LaunchCoordinator {
         .camera(.authorizationChanged(.authorized))
       ):
       state = .monitoring(.startingCapture)
-      return [.camera(.startBuiltInCamera)]
+      return [.camera(nextStartBuiltInCameraEffect())]
 
     case (
       .monitoring(.awaitingAuthorization),
@@ -377,13 +532,13 @@ public final class LaunchCoordinator {
       (.monitoring(.startingCapture), .camera(.authorizationChanged(.denied))),
       (.monitoring(.interrupted), .camera(.authorizationChanged(.denied))),
       (.monitoring(.rebuildingCapture), .camera(.authorizationChanged(.denied))):
-      return releaseCameraAfterAuthorizationFailure(.authorizationDenied)
+      return releaseCameraBecauseUnavailable(.authorizationDenied)
 
     case (.monitoring(.active), .camera(.authorizationChanged(.restricted))),
       (.monitoring(.startingCapture), .camera(.authorizationChanged(.restricted))),
       (.monitoring(.interrupted), .camera(.authorizationChanged(.restricted))),
       (.monitoring(.rebuildingCapture), .camera(.authorizationChanged(.restricted))):
-      return releaseCameraAfterAuthorizationFailure(.authorizationRestricted)
+      return releaseCameraBecauseUnavailable(.authorizationRestricted)
 
     case (
       .monitoring(.awaitingAuthorization),
@@ -401,60 +556,73 @@ public final class LaunchCoordinator {
       state = .monitoring(.unavailable(reason))
       return [.presentMenu(.cameraUnavailable(reason))]
 
-    case (
-      .monitoring(.startingCapture),
-      .camera(.captureStartCompleted(.succeeded))
-    ),
-      (
-        .monitoring(.rebuildingCapture),
-        .camera(.captureStartCompleted(.succeeded))
-      ):
-      state = .monitoring(.active)
-      return [.presentMenu(.activeMonitoring)]
+    case (_, .camera(.recognitionFrameRateSelected(let selection))):
+      guard
+        isRecognitionCaptureState,
+        selection.lifecycleID == currentRecognitionLifecycleID,
+        selection.targetFrameRate == targetFrameRate,
+        selection.actualFramesPerSecond > 0,
+        selection.actualFramesPerSecond <= Double(targetFrameRate.rawValue) + 0.001
+      else { return [] }
+      selectedCaptureFramesPerSecond = selection.actualFramesPerSecond
+      return [.presentRecognitionDiagnostics(currentRecognitionDiagnostics)]
 
     case (
-      .monitoring(.startingCapture),
-      .camera(.captureStartCompleted(.failed(let failure)))
-    ),
-      (
-        .monitoring(.rebuildingCapture),
-        .camera(.captureStartCompleted(.failed(let failure)))
-      ):
-      let reason = CameraUnavailableReason.capture(failure)
-      state = .monitoring(.unavailable(reason))
-      return [.presentMenu(.cameraUnavailable(reason))]
+      _,
+      .camera(
+        .captureStartCompleted(
+          lifecycleID: let lifecycleID,
+          result: let result
+        )
+      )
+    ):
+      return handleCaptureStartCompletion(
+        lifecycleID: lifecycleID,
+        result: result
+      )
 
-    case (.monitoring(.active), .camera(.captureInterrupted)),
-      (.monitoring(.startingCapture), .camera(.captureInterrupted)),
-      (.monitoring(.rebuildingCapture), .camera(.captureInterrupted)):
-      state = .monitoring(.interrupted)
-      return [
-        .clearRecognitionEvidence,
-        .camera(.stopCapture),
-        .presentMenu(.captureInterrupted),
-      ]
+    case (_, .recognitionFrameCaptured(let frame)):
+      return handleCapturedRecognitionFrame(frame)
+
+    case (_, .recognitionFrameCompleted(let completion)):
+      return handleCompletedRecognitionFrame(completion)
+
+    case (
+      .monitoring(.active),
+      .recognitionFrameRateRequested(let requestedFrameRate)
+    ):
+      guard requestedFrameRate != targetFrameRate else { return [] }
+      targetFrameRate = requestedFrameRate
+      let resetEffects = resetRecognitionPipelineEffects()
+      return resetEffects + [.camera(nextUpdateRecognitionFrameRateEffect())]
+
+    case (
+      _,
+      .camera(.captureInterrupted(lifecycleID: let lifecycleID))
+    ):
+      return handleCaptureInterruption(lifecycleID: lifecycleID)
 
     case (
       .monitoring(.interrupted),
-      .camera(.captureInterruptionEnded)
-    ):
+      .camera(.captureInterruptionEnded(lifecycleID: let lifecycleID))
+    ) where lifecycleID == currentCameraLifecycleID:
       state = .monitoring(.startingCapture)
-      return [.camera(.startBuiltInCamera)]
+      return [.camera(nextStartBuiltInCameraEffect())]
 
     case (.monitoring(.active), .camera(.cameraSwitchDetected)),
       (.monitoring(.startingCapture), .camera(.cameraSwitchDetected)),
       (.monitoring(.interrupted), .camera(.cameraSwitchDetected)):
       state = .monitoring(.rebuildingCapture)
-      return [
-        .clearRecognitionEvidence,
-        .camera(.rebuildBuiltInCamera),
+      let resetEffects = resetRecognitionPipelineEffects()
+      return resetEffects + [
+        .camera(nextRebuildBuiltInCameraEffect()),
         .presentMenu(.captureInterrupted),
       ]
 
     case (.monitoring(.paused), .camera(.cameraSwitchDetected)),
       (.monitoring(.awaitingAuthorization), .camera(.cameraSwitchDetected)),
       (.monitoring(.unavailable), .camera(.cameraSwitchDetected)):
-      return [.clearRecognitionEvidence]
+      return resetRecognitionPipelineEffects()
 
     case (.monitoring(.active), .camera(.systemWillSleep)),
       (.monitoring(.startingCapture), .camera(.systemWillSleep)),
@@ -463,20 +631,19 @@ public final class LaunchCoordinator {
       state = .monitoring(
         .releasing(.sleeping(.startCapture, wakeReceived: false))
       )
-      return [
-        .clearRecognitionEvidence,
+      return resetRecognitionPipelineEffects() + [
         .camera(.stopAndReleaseCamera),
         .presentMenu(.captureInterrupted),
       ]
 
     case (.monitoring(.paused), .camera(.systemWillSleep)):
       state = .monitoring(.sleeping(.remainPaused))
-      return [.clearRecognitionEvidence]
+      return resetRecognitionPipelineEffects()
 
     case (.monitoring(.awaitingAuthorization), .camera(.systemWillSleep)),
       (.monitoring(.unavailable), .camera(.systemWillSleep)):
       state = .monitoring(.sleeping(.requestAuthorization))
-      return [.clearRecognitionEvidence]
+      return resetRecognitionPipelineEffects()
 
     case (
       .monitoring(.releasing(.sleeping(let action, wakeReceived: false))),
@@ -520,18 +687,16 @@ public final class LaunchCoordinator {
     case (.monitoring(.awaitingAuthorization), .pauseMonitoringRequested),
       (.monitoring(.unavailable), .pauseMonitoringRequested):
       state = .monitoring(.paused)
-      return [
-        .clearRecognitionEvidence,
-        .presentMenu(.pausedMonitoring),
+      return resetRecognitionPipelineEffects() + [
+        .presentMenu(.pausedMonitoring)
       ]
 
     case (.monitoring(.active), .pauseMonitoringRequested),
       (.monitoring(.startingCapture), .pauseMonitoringRequested),
       (.monitoring(.rebuildingCapture), .pauseMonitoringRequested):
       state = .monitoring(.releasing(.paused))
-      return [
-        .clearRecognitionEvidence,
-        .camera(.stopAndReleaseCamera),
+      return resetRecognitionPipelineEffects() + [
+        .camera(.stopAndReleaseCamera)
       ]
 
     case (.monitoring(.interrupted), .pauseMonitoringRequested):
@@ -627,11 +792,9 @@ public final class LaunchCoordinator {
         priorState: .activeMonitoring
       )
       state = .suspendingRecognizerTraining(context)
-      return [
-        .presentRecognizerTraining(.preparing),
-        .clearRecognitionEvidence,
-        .camera(.stopAndReleaseCamera),
-      ]
+      return [.presentRecognizerTraining(.preparing)]
+        + resetRecognitionPipelineEffects()
+        + [.camera(.stopAndReleaseCamera)]
 
     case (.monitoring(.paused), .recognizerTrainingRequested):
       guard let input = validatedTrainingInput else { return [] }
@@ -795,9 +958,8 @@ public final class LaunchCoordinator {
       (.monitoring(.rebuildingCapture), .quitRequested):
       state = .monitoring(.releasing(.terminated))
       primaryWorkflowState = .idle
-      return [
-        .clearRecognitionEvidence,
-        .camera(.stopAndReleaseCamera),
+      return resetRecognitionPipelineEffects() + [
+        .camera(.stopAndReleaseCamera)
       ]
 
     case (.monitoring(.releasing(.paused)), .quitRequested),
@@ -914,10 +1076,10 @@ public final class LaunchCoordinator {
     var effects: Effects
     switch outcome {
     case .succeeded:
-      effects = [
-        .clearRecognitionEvidence,
-        .presentRecognizerTraining(.succeeded),
-      ]
+      effects =
+        resetRecognitionPipelineEffects() + [
+          .presentRecognizerTraining(.succeeded)
+        ]
     case .cancelled:
       effects = [.presentRecognizerTraining(.cancelled)]
     case .failed(let failure):
@@ -944,12 +1106,11 @@ public final class LaunchCoordinator {
     return effects
   }
 
-  private func releaseCameraAfterAuthorizationFailure(
+  private func releaseCameraBecauseUnavailable(
     _ reason: CameraUnavailableReason
   ) -> Effects {
     state = .monitoring(.releasing(.unavailable(reason)))
-    return [
-      .clearRecognitionEvidence,
+    return resetRecognitionPipelineEffects() + [
       .camera(.stopAndReleaseCamera),
       .presentMenu(.cameraUnavailable(reason)),
     ]
@@ -959,7 +1120,7 @@ public final class LaunchCoordinator {
     switch action {
     case .startCapture:
       state = .monitoring(.startingCapture)
-      return [.camera(.startBuiltInCamera)]
+      return [.camera(nextStartBuiltInCameraEffect())]
     case .requestAuthorization:
       state = .monitoring(.awaitingAuthorization)
       return [
@@ -973,6 +1134,202 @@ public final class LaunchCoordinator {
       state = .monitoring(.paused)
       return [.presentMenu(.pausedMonitoring)]
     }
+  }
+
+  private func nextStartBuiltInCameraEffect() -> CameraEffect {
+    .startBuiltInCamera(
+      targetFrameRate: targetFrameRate,
+      lifecycleID: beginRecognitionLifecycle()
+    )
+  }
+
+  private func nextUpdateRecognitionFrameRateEffect() -> CameraEffect {
+    .updateRecognitionFrameRate(
+      targetFrameRate: targetFrameRate,
+      lifecycleID: beginRecognitionLifecycle()
+    )
+  }
+
+  private func nextRebuildBuiltInCameraEffect() -> CameraEffect {
+    .rebuildBuiltInCamera(
+      targetFrameRate: targetFrameRate,
+      lifecycleID: beginRecognitionLifecycle()
+    )
+  }
+
+  private func beginRecognitionLifecycle() -> RecognitionLifecycleID {
+    resetRecognitionPipelineState()
+    recognitionLifecycleSequence += 1
+    let lifecycleID = RecognitionLifecycleID(
+      rawValue: recognitionLifecycleSequence
+    )
+    currentRecognitionLifecycleID = lifecycleID
+    currentCameraLifecycleID = lifecycleID
+    return lifecycleID
+  }
+
+  private func resetRecognitionPipelineEffects() -> Effects {
+    resetRecognitionPipelineState()
+    return [
+      .clearRecognitionEvidence,
+      .presentRecognitionDiagnostics(
+        .initial(targetFrameRate: targetFrameRate)
+      ),
+    ]
+  }
+
+  private func resetRecognitionPipelineState() {
+    currentRecognitionLifecycleID = nil
+    selectedCaptureFramesPerSecond = nil
+    inFlightRecognitionFrame = nil
+    pendingRecognitionFrame = nil
+    latestDiagnosticGesture = nil
+    recognitionCompletionTimes.removeAll()
+    completedRecognitionFramesPerSecond = 0
+  }
+
+  private var isRecognitionCaptureState: Bool {
+    switch state {
+    case .monitoring(.startingCapture),
+      .monitoring(.active),
+      .monitoring(.rebuildingCapture):
+      true
+    default:
+      false
+    }
+  }
+
+  private var currentRecognitionDiagnostics: RecognitionDiagnostics {
+    RecognitionDiagnostics(
+      targetFrameRate: targetFrameRate,
+      captureFramesPerSecond: selectedCaptureFramesPerSecond,
+      completedRecognitionFramesPerSecond: completedRecognitionFramesPerSecond,
+      diagnosticGesture: latestDiagnosticGesture
+    )
+  }
+
+  private func handleCaptureInterruption(
+    lifecycleID: RecognitionLifecycleID
+  ) -> Effects {
+    guard lifecycleID == currentCameraLifecycleID else { return [] }
+    switch state {
+    case .monitoring(.active),
+      .monitoring(.startingCapture),
+      .monitoring(.rebuildingCapture):
+      state = .monitoring(.interrupted)
+      return resetRecognitionPipelineEffects() + [
+        .camera(.stopCapture),
+        .presentMenu(.captureInterrupted),
+      ]
+    default:
+      return []
+    }
+  }
+
+  private func handleCaptureStartCompletion(
+    lifecycleID: RecognitionLifecycleID,
+    result: CameraCaptureStartResult
+  ) -> Effects {
+    guard lifecycleID == currentCameraLifecycleID else { return [] }
+
+    switch (state, result) {
+    case (.monitoring(.startingCapture), .succeeded),
+      (.monitoring(.rebuildingCapture), .succeeded):
+      state = .monitoring(.active)
+      return [.presentMenu(.activeMonitoring)]
+    case (.monitoring(.active), .failed(let failure)):
+      return releaseCameraBecauseUnavailable(.capture(failure))
+    case (.monitoring(.startingCapture), .failed(let failure)),
+      (.monitoring(.rebuildingCapture), .failed(let failure)):
+      let reason = CameraUnavailableReason.capture(failure)
+      state = .monitoring(.unavailable(reason))
+      return resetRecognitionPipelineEffects() + [
+        .presentMenu(.cameraUnavailable(reason))
+      ]
+    default:
+      return []
+    }
+  }
+
+  private func handleCapturedRecognitionFrame(
+    _ frame: RecognitionFrameReference
+  ) -> Effects {
+    guard
+      case .monitoring(.active) = state,
+      frame.lifecycleID == currentRecognitionLifecycleID
+    else {
+      return [.recognition(.discardFrame(frame))]
+    }
+
+    guard let inFlightRecognitionFrame else {
+      self.inFlightRecognitionFrame = frame
+      return [.recognition(.analyzeFrame(frame))]
+    }
+
+    guard frame.sequenceNumber > inFlightRecognitionFrame.sequenceNumber else {
+      return [.recognition(.discardFrame(frame))]
+    }
+
+    guard let pendingRecognitionFrame else {
+      self.pendingRecognitionFrame = frame
+      return []
+    }
+
+    guard frame.sequenceNumber > pendingRecognitionFrame.sequenceNumber else {
+      return [.recognition(.discardFrame(frame))]
+    }
+
+    self.pendingRecognitionFrame = frame
+    return [.recognition(.discardFrame(pendingRecognitionFrame))]
+  }
+
+  private func handleCompletedRecognitionFrame(
+    _ completion: RecognitionFrameCompletion
+  ) -> Effects {
+    guard
+      case .monitoring(.active) = state,
+      completion.frame.lifecycleID == currentRecognitionLifecycleID,
+      completion.frame == inFlightRecognitionFrame
+    else { return [] }
+
+    inFlightRecognitionFrame = nil
+    recordRecognitionCompletion()
+    latestDiagnosticGesture = completion.diagnosticGesture
+    var effects: Effects = [
+      .presentRecognitionDiagnostics(currentRecognitionDiagnostics)
+    ]
+
+    if let pendingRecognitionFrame {
+      self.pendingRecognitionFrame = nil
+      inFlightRecognitionFrame = pendingRecognitionFrame
+      effects.append(.recognition(.analyzeFrame(pendingRecognitionFrame)))
+    }
+    return effects
+  }
+
+  private func recordRecognitionCompletion() {
+    let completionTime = recognitionClock()
+    if let previousTime = recognitionCompletionTimes.last,
+      completionTime < previousTime
+    {
+      recognitionCompletionTimes.removeAll()
+    }
+
+    recognitionCompletionTimes.append(completionTime)
+    let cutoff = completionTime - 1
+    recognitionCompletionTimes.removeAll { $0 < cutoff }
+
+    guard
+      let first = recognitionCompletionTimes.first,
+      let last = recognitionCompletionTimes.last,
+      recognitionCompletionTimes.count > 1,
+      last > first
+    else {
+      completedRecognitionFramesPerSecond = 0
+      return
+    }
+    completedRecognitionFramesPerSecond =
+      Double(recognitionCompletionTimes.count - 1) / (last - first)
   }
 
   private func handlePrimaryWorkflow(_ event: AppEvent) -> Effects {

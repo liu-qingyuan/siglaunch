@@ -4,6 +4,7 @@ import SiglaunchCore
 @MainActor
 final class AppRuntime: ObservableObject {
   @Published private(set) var menuPresentation: MenuPresentation?
+  @Published private(set) var recognitionDiagnostics: RecognitionDiagnostics?
   @Published private(set) var primaryWorkflowPresentation: PrimaryWorkflowPresentation?
   @Published private(set) var poseDatasetImportPresentation: PoseDatasetImportPresentation?
   @Published private(set) var recognizerTrainingPresentation: RecognizerTrainingPresentation?
@@ -17,6 +18,9 @@ final class AppRuntime: ObservableObject {
     },
     workflowSink: { [weak self] presentation in
       self?.primaryWorkflowPresentation = presentation
+    },
+    recognitionDiagnosticsSink: { [weak self] diagnostics in
+      self?.recognitionDiagnostics = diagnostics
     },
     poseDatasetSink: { [weak self] presentation in
       self?.poseDatasetImportPresentation = presentation
@@ -49,6 +53,10 @@ final class AppRuntime: ObservableObject {
 
   func resumeMonitoring() {
     send(.resumeMonitoringRequested)
+  }
+
+  func selectRecognitionFrameRate(_ frameRate: RecognitionFrameRate) {
+    send(.recognitionFrameRateRequested(frameRate))
   }
 
   func importPoseDataset() {
