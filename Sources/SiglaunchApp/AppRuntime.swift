@@ -5,6 +5,7 @@ import SiglaunchCore
 final class AppRuntime: ObservableObject {
   @Published private(set) var menuPresentation: MenuPresentation?
   @Published private(set) var primaryWorkflowPresentation: PrimaryWorkflowPresentation?
+  @Published private(set) var poseDatasetImportPresentation: PoseDatasetImportPresentation?
 
   private let coordinator = LaunchCoordinator()
   private lazy var effectAdapter = ProductionEffectAdapter(
@@ -15,6 +16,9 @@ final class AppRuntime: ObservableObject {
     },
     workflowSink: { [weak self] presentation in
       self?.primaryWorkflowPresentation = presentation
+    },
+    poseDatasetSink: { [weak self] presentation in
+      self?.poseDatasetImportPresentation = presentation
     }
   )
 
@@ -30,5 +34,9 @@ final class AppRuntime: ObservableObject {
     for effect in coordinator.handle(event) {
       effectAdapter.execute(effect)
     }
+  }
+
+  func importPoseDataset() {
+    send(.poseDatasetImportRequested)
   }
 }

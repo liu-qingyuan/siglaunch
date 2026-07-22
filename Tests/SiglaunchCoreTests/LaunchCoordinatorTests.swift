@@ -88,6 +88,147 @@ final class LaunchCoordinatorTests: XCTestCase {
     assertEffects(steps, from: coordinator)
   }
 
+  func testSetupRequiredPoseDatasetImportReachesDatasetReadyThroughPublicEffects() {
+    let coordinator = makeSetupRequiredCoordinator()
+    let selectedPath = "/Users/developer/Pose Dataset"
+    let progress = PoseDatasetPreparationProgress(
+      label: .domainExpansion,
+      processedImageCount: 7,
+      totalImageCount: 24
+    )
+    let input = makeTrainingInput()
+    let steps: [Step] = [
+      (
+        "Setup Required offers the system folder picker",
+        .poseDatasetImportRequested,
+        [
+          .presentPoseDatasetImport(.choosingFolder),
+          .selectPoseDatasetFolder,
+        ]
+      ),
+      (
+        "a duplicate request cannot open a second picker",
+        .poseDatasetImportRequested,
+        []
+      ),
+      (
+        "the selected root starts production preparation",
+        .poseDatasetFolderSelectionCompleted(.selected(path: selectedPath)),
+        [
+          .presentPoseDatasetImport(.validating(nil)),
+          .preparePoseDataset(at: selectedPath),
+        ]
+      ),
+      (
+        "production progress remains observable at the coordinator seam",
+        .poseDatasetPreparationProgressed(progress),
+        [.presentPoseDatasetImport(.validating(progress))]
+      ),
+      (
+        "validated normalized samples become local training input only",
+        .poseDatasetPreparationCompleted(.succeeded(input)),
+        [.presentPoseDatasetImport(.ready(input))]
+      ),
+      (
+        "a stale completion cannot replace the ready input",
+        .poseDatasetPreparationCompleted(
+          .failed(.rootDirectoryUnavailable(.missing))
+        ),
+        []
+      ),
+      (
+        "Dataset Ready permits an explicit replacement import",
+        .poseDatasetImportRequested,
+        [
+          .presentPoseDatasetImport(.choosingFolder),
+          .selectPoseDatasetFolder,
+        ]
+      ),
+    ]
+
+    assertEffects(steps, from: coordinator)
+  }
+
+  func testPoseDatasetFolderCancellationReturnsToSetupRequired() {
+    let coordinator = makeSetupRequiredCoordinator()
+    XCTAssertEqual(
+      coordinator.handle(.poseDatasetImportRequested),
+      [
+        .presentPoseDatasetImport(.choosingFolder),
+        .selectPoseDatasetFolder,
+      ]
+    )
+    XCTAssertEqual(
+      coordinator.handle(.poseDatasetFolderSelectionCompleted(.cancelled)),
+      [.presentPoseDatasetImport(nil)]
+    )
+    XCTAssertEqual(
+      coordinator.handle(
+        .poseDatasetFolderSelectionCompleted(.selected(path: "/stale"))
+      ),
+      []
+    )
+    XCTAssertEqual(
+      coordinator.handle(.poseDatasetImportRequested),
+      [
+        .presentPoseDatasetImport(.choosingFolder),
+        .selectPoseDatasetFolder,
+      ]
+    )
+  }
+
+  func testPoseDatasetValidationFailuresReportAndPermitAnotherImport() {
+    let summary = PoseDatasetSummary(
+      domainExpansion: PoseDatasetLabelSummary(
+        validImageCount: 9,
+        handlessImageCount: 2,
+        unreadableImageCount: 1
+      ),
+      other: PoseDatasetLabelSummary(
+        validImageCount: 10,
+        handlessImageCount: 0,
+        unreadableImageCount: 3
+      )
+    )
+    let failures: [PoseDatasetImportFailure] = [
+      .rootDirectoryUnavailable(.unreadable),
+      .labelDirectoryUnavailable(label: .domainExpansion, reason: .missing),
+      .labelDirectoryUnavailable(label: .other, reason: .notDirectory),
+      .insufficientValidImages(summary: summary, minimumPerLabel: 10),
+      .preparationFailed(summary: summary),
+      .outputUnavailable,
+    ]
+
+    for failure in failures {
+      let coordinator = makeCoordinatorValidatingPoseDataset()
+      XCTAssertEqual(
+        coordinator.handle(.poseDatasetPreparationCompleted(.failed(failure))),
+        [.presentPoseDatasetImport(.failed(failure))],
+        "failure: \(failure)"
+      )
+      XCTAssertEqual(
+        coordinator.handle(.poseDatasetImportRequested),
+        [
+          .presentPoseDatasetImport(.choosingFolder),
+          .selectPoseDatasetFolder,
+        ],
+        "failure should return to Setup Required: \(failure)"
+      )
+    }
+  }
+
+  func testPoseDatasetImportIsUnavailableWhenPersonalRecognizerExists() {
+    let coordinator = makeWorkflowReadyCoordinator()
+
+    XCTAssertEqual(coordinator.handle(.poseDatasetImportRequested), [])
+    XCTAssertEqual(
+      coordinator.handle(
+        .poseDatasetFolderSelectionCompleted(.selected(path: "/unexpected"))
+      ),
+      []
+    )
+  }
+
   func testQuitTerminatesApplicationOnceFromEveryReachableMenuState() {
     let cases: [(name: String, priorEvents: [AppEvent])] = [
       ("configuring the menu-bar application", [.appLaunched]),
@@ -114,6 +255,39 @@ final class LaunchCoordinatorTests: XCTestCase {
           .menuBarApplicationConfigurationCompleted(.succeeded),
           .personalRecognizerChecked(.missing),
           .menuPresented(.setupRequired),
+        ]
+      ),
+      (
+        "choosing a Pose Dataset folder",
+        [
+          .appLaunched,
+          .menuBarApplicationConfigurationCompleted(.succeeded),
+          .personalRecognizerChecked(.missing),
+          .menuPresented(.setupRequired),
+          .poseDatasetImportRequested,
+        ]
+      ),
+      (
+        "validating a Pose Dataset",
+        [
+          .appLaunched,
+          .menuBarApplicationConfigurationCompleted(.succeeded),
+          .personalRecognizerChecked(.missing),
+          .menuPresented(.setupRequired),
+          .poseDatasetImportRequested,
+          .poseDatasetFolderSelectionCompleted(.selected(path: "/Pose Dataset")),
+        ]
+      ),
+      (
+        "Pose Dataset ready",
+        [
+          .appLaunched,
+          .menuBarApplicationConfigurationCompleted(.succeeded),
+          .personalRecognizerChecked(.missing),
+          .menuPresented(.setupRequired),
+          .poseDatasetImportRequested,
+          .poseDatasetFolderSelectionCompleted(.selected(path: "/Pose Dataset")),
+          .poseDatasetPreparationCompleted(.succeeded(makeTrainingInput())),
         ]
       ),
     ]
@@ -534,6 +708,59 @@ final class LaunchCoordinatorTests: XCTestCase {
         .menuPresented(.personalRecognizerReady),
       ]
     )
+  }
+
+  private func makeSetupRequiredCoordinator() -> LaunchCoordinator {
+    makeCoordinator(
+      after: [
+        .appLaunched,
+        .menuBarApplicationConfigurationCompleted(.succeeded),
+        .personalRecognizerChecked(.missing),
+        .menuPresented(.setupRequired),
+      ]
+    )
+  }
+
+  private func makeCoordinatorValidatingPoseDataset() -> LaunchCoordinator {
+    let coordinator = makeSetupRequiredCoordinator()
+    _ = coordinator.handle(.poseDatasetImportRequested)
+    _ = coordinator.handle(
+      .poseDatasetFolderSelectionCompleted(.selected(path: "/Pose Dataset"))
+    )
+    return coordinator
+  }
+
+  private func makeTrainingInput() -> PoseDatasetTrainingInput {
+    let directoryPath = "/Application Support/Siglaunch/Pose Datasets/prepared"
+    let summary = PoseDatasetSummary(
+      domainExpansion: PoseDatasetLabelSummary(
+        validImageCount: 10,
+        handlessImageCount: 1,
+        unreadableImageCount: 2
+      ),
+      other: PoseDatasetLabelSummary(
+        validImageCount: 11,
+        handlessImageCount: 3,
+        unreadableImageCount: 4
+      )
+    )
+    let sampleCounts: [(PoseDatasetLabel, Int)] = [
+      (.domainExpansion, summary.domainExpansion.validImageCount),
+      (.other, summary.other.validImageCount),
+    ]
+    let samples = sampleCounts.flatMap { label, count in
+      (0..<count).map { index in
+        PoseDatasetSample(
+          label: label,
+          imagePath: "\(directoryPath)/\(label.rawValue)/\(index).png"
+        )
+      }
+    }
+    return PoseDatasetTrainingInput(
+      directoryPath: directoryPath,
+      samples: samples,
+      summary: summary
+    )!
   }
 
   private var workflowConfiguration: WorkflowConfiguration {

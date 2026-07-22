@@ -11,6 +11,8 @@ struct SiglaunchApplication: App {
       SiglaunchMenu(
         presentation: runtime.menuPresentation,
         primaryWorkflowPresentation: runtime.primaryWorkflowPresentation,
+        poseDatasetImportPresentation: runtime.poseDatasetImportPresentation,
+        onImportPoseDataset: runtime.importPoseDataset,
         onQuit: { runtime.send(.quitRequested) }
       )
     } label: {

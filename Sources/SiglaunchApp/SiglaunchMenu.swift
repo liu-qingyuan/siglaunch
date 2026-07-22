@@ -4,6 +4,8 @@ import SwiftUI
 struct SiglaunchMenu: View {
   let presentation: MenuPresentation?
   let primaryWorkflowPresentation: PrimaryWorkflowPresentation?
+  let poseDatasetImportPresentation: PoseDatasetImportPresentation?
+  let onImportPoseDataset: () -> Void
   let onQuit: () -> Void
 
   var body: some View {
@@ -24,7 +26,22 @@ struct SiglaunchMenu: View {
       }
     }
 
+    if let content = poseDatasetImportPresentation?.content {
+      Divider()
+      Label(content.title, systemImage: content.symbolName)
+      if let detail = content.detail {
+        Text(detail)
+      }
+    }
+
     Divider()
+
+    if presentation == .setupRequired {
+      Button(action: onImportPoseDataset) {
+        Label("Import Pose Dataset", systemImage: "folder.badge.plus")
+      }
+      .disabled(poseDatasetImportPresentation?.isInProgress == true)
+    }
 
     Button(action: onQuit) {
       Label("Quit Siglaunch", systemImage: "power")
@@ -96,6 +113,93 @@ extension PrimaryWorkflowFailure {
     case .malformedHerdrOutput:
       "Herdr returned malformed Agent JSON."
     }
+  }
+}
+
+extension PoseDatasetImportPresentation {
+  var isInProgress: Bool {
+    switch self {
+    case .choosingFolder, .validating:
+      true
+    case .failed, .ready:
+      false
+    }
+  }
+
+  var content: MenuStatusContent {
+    switch self {
+    case .choosingFolder:
+      MenuStatusContent(
+        title: "Choosing Pose Dataset",
+        symbolName: "folder",
+        detail: nil
+      )
+    case .validating(let progress):
+      MenuStatusContent(
+        title: "Validating Pose Dataset",
+        symbolName: "hand.raised",
+        detail: progress.map {
+          "\($0.processedImageCount) of \($0.totalImageCount) images processed"
+        }
+      )
+    case .failed(let failure):
+      MenuStatusContent(
+        title: "Pose Dataset Invalid",
+        symbolName: "exclamationmark.triangle",
+        detail: failure.detail
+      )
+    case .ready(let input):
+      MenuStatusContent(
+        title: "Pose Dataset Ready",
+        symbolName: "checkmark.circle",
+        detail: input.summary.detail
+      )
+    }
+  }
+}
+
+extension PoseDatasetImportFailure {
+  fileprivate var detail: String {
+    switch self {
+    case .rootDirectoryUnavailable(let reason):
+      "Selected root \(reason.detail)."
+    case .labelDirectoryUnavailable(let label, let reason):
+      "\(label.rawValue)/ \(reason.detail)."
+    case .insufficientValidImages(let summary, let minimumPerLabel):
+      "\(summary.detail); minimum \(minimumPerLabel) valid images per label"
+    case .preparationFailed(let summary):
+      "Vision preparation failed; \(summary.detail)"
+    case .outputUnavailable:
+      "Normalized images could not be saved locally."
+    }
+  }
+}
+
+extension PoseDatasetDirectoryFailure {
+  fileprivate var detail: String {
+    switch self {
+    case .missing:
+      "is missing"
+    case .notDirectory:
+      "is not a directory"
+    case .unreadable:
+      "cannot be read"
+    }
+  }
+}
+
+extension PoseDatasetSummary {
+  fileprivate var detail: String {
+    [
+      domainExpansion.detail(label: PoseDatasetLabel.domainExpansion.rawValue),
+      other.detail(label: PoseDatasetLabel.other.rawValue),
+    ].joined(separator: "; ")
+  }
+}
+
+extension PoseDatasetLabelSummary {
+  fileprivate func detail(label: String) -> String {
+    "\(label): \(validImageCount) valid, \(handlessImageCount) handless, \(unreadableImageCount) unreadable"
   }
 }
 

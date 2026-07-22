@@ -85,6 +85,102 @@ final class ProductionEffectAdapterTests: XCTestCase {
     XCTAssertEqual(workflowPresentations, [nil, .leadingPiAgentFocused])
   }
 
+  func testFakePoseDatasetAdaptersDriveImportThroughCoordinatorLoop() async {
+    let rootPath = "/Users/developer/Pose Dataset"
+    let progress = PoseDatasetPreparationProgress(
+      label: .other,
+      processedImageCount: 20,
+      totalImageCount: 20
+    )
+    let summary = PoseDatasetSummary(
+      domainExpansion: PoseDatasetLabelSummary(
+        validImageCount: 10,
+        handlessImageCount: 1,
+        unreadableImageCount: 0
+      ),
+      other: PoseDatasetLabelSummary(
+        validImageCount: 10,
+        handlessImageCount: 0,
+        unreadableImageCount: 2
+      )
+    )
+    let samples = PoseDatasetLabel.allCases.flatMap { label in
+      (0..<summary.summary(for: label).validImageCount).map { index in
+        PoseDatasetSample(
+          label: label,
+          imagePath: "/prepared/\(label.rawValue)/\(index).png"
+        )
+      }
+    }
+    let input = PoseDatasetTrainingInput(
+      directoryPath: "/prepared",
+      samples: samples,
+      summary: summary
+    )!
+    let folderSelector = FakePoseDatasetFolderSelector(
+      result: .selected(path: rootPath)
+    )
+    let preparer = FakePoseDatasetPreparer(
+      progress: [progress],
+      result: .succeeded(input)
+    )
+    let coordinator = makeSetupRequiredCoordinator()
+    let ready = expectation(description: "Pose Dataset ready")
+
+    var observedEffects: [AppEffect] = []
+    var presentations: [PoseDatasetImportPresentation?] = []
+    var sendEvent: ((AppEvent) -> Void)!
+    var effectAdapter: ProductionEffectAdapter!
+    effectAdapter = ProductionEffectAdapter(
+      recognizerStore: PersonalRecognizerStore(),
+      poseDatasetFolderSelector: folderSelector,
+      poseDatasetPreparer: preparer,
+      eventSink: { event in sendEvent(event) },
+      menuSink: { _ in },
+      workflowSink: { _ in },
+      poseDatasetSink: { presentation in
+        presentations.append(presentation)
+        if presentation == .ready(input) {
+          ready.fulfill()
+        }
+      }
+    )
+    sendEvent = { event in
+      let effects = coordinator.handle(event)
+      observedEffects.append(contentsOf: effects)
+      for effect in effects {
+        effectAdapter.execute(effect)
+      }
+    }
+
+    sendEvent(.poseDatasetImportRequested)
+    await fulfillment(of: [ready], timeout: 1)
+
+    XCTAssertEqual(
+      observedEffects,
+      [
+        .presentPoseDatasetImport(.choosingFolder),
+        .selectPoseDatasetFolder,
+        .presentPoseDatasetImport(.validating(nil)),
+        .preparePoseDataset(at: rootPath),
+        .presentPoseDatasetImport(.validating(progress)),
+        .presentPoseDatasetImport(.ready(input)),
+      ]
+    )
+    XCTAssertEqual(
+      presentations,
+      [
+        .choosingFolder,
+        .validating(nil),
+        .validating(progress),
+        .ready(input),
+      ]
+    )
+    XCTAssertEqual(folderSelector.selectionCount, 1)
+    let requestedPaths = await preparer.requestedPaths
+    XCTAssertEqual(requestedPaths, [rootPath])
+  }
+
   private func makeWorkflowReadyCoordinator() -> LaunchCoordinator {
     let coordinator = LaunchCoordinator()
     for event in [
@@ -96,6 +192,59 @@ final class ProductionEffectAdapterTests: XCTestCase {
       _ = coordinator.handle(event)
     }
     return coordinator
+  }
+
+  private func makeSetupRequiredCoordinator() -> LaunchCoordinator {
+    let coordinator = LaunchCoordinator()
+    for event in [
+      AppEvent.appLaunched,
+      .menuBarApplicationConfigurationCompleted(.succeeded),
+      .personalRecognizerChecked(.missing),
+      .menuPresented(.setupRequired),
+    ] {
+      _ = coordinator.handle(event)
+    }
+    return coordinator
+  }
+}
+
+@MainActor
+private final class FakePoseDatasetFolderSelector: PoseDatasetFolderSelecting {
+  let result: PoseDatasetFolderSelectionResult
+  private(set) var selectionCount = 0
+
+  init(result: PoseDatasetFolderSelectionResult) {
+    self.result = result
+  }
+
+  func selectFolder() -> PoseDatasetFolderSelectionResult {
+    selectionCount += 1
+    return result
+  }
+}
+
+private actor FakePoseDatasetPreparer: PoseDatasetPreparing {
+  let progressValues: [PoseDatasetPreparationProgress]
+  let result: PoseDatasetPreparationResult
+  private(set) var requestedPaths: [String] = []
+
+  init(
+    progress: [PoseDatasetPreparationProgress],
+    result: PoseDatasetPreparationResult
+  ) {
+    self.progressValues = progress
+    self.result = result
+  }
+
+  func prepare(
+    at rootPath: String,
+    progress: @escaping @Sendable (PoseDatasetPreparationProgress) async -> Void
+  ) async -> PoseDatasetPreparationResult {
+    requestedPaths.append(rootPath)
+    for value in progressValues {
+      await progress(value)
+    }
+    return result
   }
 }
 

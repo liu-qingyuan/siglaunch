@@ -149,6 +149,10 @@ public enum AppEvent: Equatable, Sendable {
   case defaultHerdrSessionEnsureCompleted(DefaultHerdrSessionEnsureResult)
   case herdrAgentQueryCompleted(HerdrAgentQueryResult)
   case herdrAgentFocusCompleted(HerdrAgentFocusResult)
+  case poseDatasetImportRequested
+  case poseDatasetFolderSelectionCompleted(PoseDatasetFolderSelectionResult)
+  case poseDatasetPreparationProgressed(PoseDatasetPreparationProgress)
+  case poseDatasetPreparationCompleted(PoseDatasetPreparationResult)
   case quitRequested
 }
 
@@ -170,6 +174,9 @@ public enum AppEffect: Equatable, Sendable {
   case primaryWorkflowNoMatchingAgent(PrimaryWorkflowContext)
   case primaryWorkflowLeadingPiAgentFocused(LeadingPiAgentContext)
   case primaryWorkflowFailed(PrimaryWorkflowFailure)
+  case presentPoseDatasetImport(PoseDatasetImportPresentation?)
+  case selectPoseDatasetFolder
+  case preparePoseDataset(at: String)
   case terminateApplication
 }
 
@@ -182,6 +189,9 @@ public final class LaunchCoordinator {
     case checkingPersonalRecognizer
     case personalRecognizerAvailable
     case setupRequired
+    case choosingPoseDatasetFolder
+    case validatingPoseDataset
+    case poseDatasetReady(PoseDatasetTrainingInput)
     case terminated
   }
 
@@ -221,11 +231,59 @@ public final class LaunchCoordinator {
       state = .setupRequired
       return [.presentMenu(.setupRequired)]
 
+    case (.setupRequired, .poseDatasetImportRequested),
+      (.poseDatasetReady, .poseDatasetImportRequested):
+      state = .choosingPoseDatasetFolder
+      return [
+        .presentPoseDatasetImport(.choosingFolder),
+        .selectPoseDatasetFolder,
+      ]
+
+    case (
+      .choosingPoseDatasetFolder,
+      .poseDatasetFolderSelectionCompleted(.selected(let path))
+    ):
+      state = .validatingPoseDataset
+      return [
+        .presentPoseDatasetImport(.validating(nil)),
+        .preparePoseDataset(at: path),
+      ]
+
+    case (
+      .choosingPoseDatasetFolder,
+      .poseDatasetFolderSelectionCompleted(.cancelled)
+    ):
+      state = .setupRequired
+      return [.presentPoseDatasetImport(nil)]
+
+    case (
+      .validatingPoseDataset,
+      .poseDatasetPreparationProgressed(let progress)
+    ):
+      return [.presentPoseDatasetImport(.validating(progress))]
+
+    case (
+      .validatingPoseDataset,
+      .poseDatasetPreparationCompleted(.succeeded(let input))
+    ):
+      state = .poseDatasetReady(input)
+      return [.presentPoseDatasetImport(.ready(input))]
+
+    case (
+      .validatingPoseDataset,
+      .poseDatasetPreparationCompleted(.failed(let failure))
+    ):
+      state = .setupRequired
+      return [.presentPoseDatasetImport(.failed(failure))]
+
     case (.awaitingLaunch, .quitRequested),
       (.configuringMenuBarApplication, .quitRequested),
       (.checkingPersonalRecognizer, .quitRequested),
       (.personalRecognizerAvailable, .quitRequested),
-      (.setupRequired, .quitRequested):
+      (.setupRequired, .quitRequested),
+      (.choosingPoseDatasetFolder, .quitRequested),
+      (.validatingPoseDataset, .quitRequested),
+      (.poseDatasetReady, .quitRequested):
       state = .terminated
       primaryWorkflowState = .idle
       return [.terminateApplication]

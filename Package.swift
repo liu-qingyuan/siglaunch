@@ -23,7 +23,8 @@ let package = Package(
     ),
     .testTarget(
       name: "SiglaunchAppTests",
-      dependencies: ["SiglaunchApp", "SiglaunchCore"]
+      dependencies: ["SiglaunchApp", "SiglaunchCore"],
+      resources: [.process("Fixtures")]
     ),
   ]
 )

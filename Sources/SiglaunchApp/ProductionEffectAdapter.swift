@@ -13,26 +13,35 @@ final class ProductionEffectAdapter {
   private let workflowConfigurationStore: any WorkflowConfigurationLoading
   private let ghosttyPlatformAdapter: any GhosttyPlatformAdapting
   private let herdrAgentAdapter: any HerdrAgentAdapting
+  private let poseDatasetFolderSelector: any PoseDatasetFolderSelecting
+  private let poseDatasetPreparer: any PoseDatasetPreparing
   private let eventSink: (AppEvent) -> Void
   private let menuSink: (MenuPresentation) -> Void
   private let workflowSink: (PrimaryWorkflowPresentation?) -> Void
+  private let poseDatasetSink: (PoseDatasetImportPresentation?) -> Void
 
   init(
     recognizerStore: PersonalRecognizerStore,
     workflowConfigurationStore: any WorkflowConfigurationLoading = WorkflowConfigurationStore(),
     ghosttyPlatformAdapter: any GhosttyPlatformAdapting = GhosttyPlatformAdapter(),
     herdrAgentAdapter: any HerdrAgentAdapting = HerdrAgentAdapter(),
+    poseDatasetFolderSelector: any PoseDatasetFolderSelecting = SystemPoseDatasetFolderPicker(),
+    poseDatasetPreparer: any PoseDatasetPreparing = PoseDatasetAdapter(),
     eventSink: @escaping (AppEvent) -> Void,
     menuSink: @escaping (MenuPresentation) -> Void,
-    workflowSink: @escaping (PrimaryWorkflowPresentation?) -> Void
+    workflowSink: @escaping (PrimaryWorkflowPresentation?) -> Void,
+    poseDatasetSink: @escaping (PoseDatasetImportPresentation?) -> Void = { _ in }
   ) {
     self.recognizerStore = recognizerStore
     self.workflowConfigurationStore = workflowConfigurationStore
     self.ghosttyPlatformAdapter = ghosttyPlatformAdapter
     self.herdrAgentAdapter = herdrAgentAdapter
+    self.poseDatasetFolderSelector = poseDatasetFolderSelector
+    self.poseDatasetPreparer = poseDatasetPreparer
     self.eventSink = eventSink
     self.menuSink = menuSink
     self.workflowSink = workflowSink
+    self.poseDatasetSink = poseDatasetSink
   }
 
   func execute(_ effect: AppEffect) {
@@ -75,8 +84,28 @@ final class ProductionEffectAdapter {
       workflowSink(.leadingPiAgentFocused)
     case .primaryWorkflowFailed(let failure):
       workflowSink(.failed(failure))
+    case .presentPoseDatasetImport(let presentation):
+      poseDatasetSink(presentation)
+    case .selectPoseDatasetFolder:
+      eventSink(
+        .poseDatasetFolderSelectionCompleted(
+          poseDatasetFolderSelector.selectFolder()
+        )
+      )
+    case .preparePoseDataset(let path):
+      let preparer = poseDatasetPreparer
+      Task { [weak self] in
+        let result = await preparer.prepare(at: path) { [weak self] progress in
+          await self?.sendPoseDatasetProgress(progress)
+        }
+        self?.eventSink(.poseDatasetPreparationCompleted(result))
+      }
     case .terminateApplication:
       NSApplication.shared.terminate(nil)
     }
+  }
+
+  private func sendPoseDatasetProgress(_ progress: PoseDatasetPreparationProgress) {
+    eventSink(.poseDatasetPreparationProgressed(progress))
   }
 }
