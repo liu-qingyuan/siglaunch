@@ -4,6 +4,7 @@ import SiglaunchCore
 @MainActor
 final class AppRuntime: ObservableObject {
   @Published private(set) var menuPresentation: MenuPresentation?
+  @Published private(set) var primaryWorkflowPresentation: PrimaryWorkflowPresentation?
 
   private let coordinator = LaunchCoordinator()
   private lazy var effectAdapter = ProductionEffectAdapter(
@@ -11,6 +12,9 @@ final class AppRuntime: ObservableObject {
     eventSink: { [weak self] event in self?.send(event) },
     menuSink: { [weak self] presentation in
       self?.menuPresentation = presentation
+    },
+    workflowSink: { [weak self] presentation in
+      self?.primaryWorkflowPresentation = presentation
     }
   )
 

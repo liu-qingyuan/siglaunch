@@ -133,6 +133,239 @@ final class LaunchCoordinatorTests: XCTestCase {
     }
   }
 
+  func testPrimaryWorkflowColdStartPreparesGhosttyAndDefaultHerdrSession() {
+    let coordinator = makeWorkflowReadyCoordinator()
+    let configuration = WorkflowConfiguration(
+      workspacePath: "/Users/developer/work/siglaunch",
+      piCommand: ["pi", "--model", "gpt-5"]
+    )
+    let ghostty = GhosttyApplication(
+      path: "/Applications/Ghostty.app",
+      version: "1.3.0",
+      isRunning: false
+    )
+    let steps: [Step] = [
+      (
+        "a Primary Workflow request loads its strict local configuration",
+        .primaryWorkflowRequested,
+        [.loadWorkflowConfiguration]
+      ),
+      (
+        "the validated configuration starts Ghostty resolution",
+        .workflowConfigurationLoadCompleted(.loaded(configuration)),
+        [.resolveGhostty]
+      ),
+      (
+        "a supported stopped Ghostty is launched from its resolved bundle",
+        .ghosttyResolutionCompleted(.found(ghostty)),
+        [.launchGhostty(at: ghostty.path)]
+      ),
+      (
+        "a successful launch proceeds to the native AppleScript session check",
+        .ghosttyLaunchCompleted(.succeeded),
+        [.ensureDefaultHerdrSession]
+      ),
+      (
+        "starting the default Herdr Session completes this Workflow stage",
+        .defaultHerdrSessionEnsureCompleted(.ready(.started)),
+        [
+          .primaryWorkflowGhosttyReady(
+            PrimaryWorkflowContext(
+              configuration: configuration,
+              defaultHerdrSession: .started
+            )
+          )
+        ]
+      ),
+    ]
+
+    assertEffects(steps, from: coordinator)
+  }
+
+  func testPrimaryWorkflowConfigurationFailuresStopBeforeGhosttyResolution() {
+    let failures: [WorkflowConfigurationFailure] = [
+      .unavailable,
+      .malformed,
+      .invalidStructure,
+      .emptyWorkspacePath,
+      .emptyPiCommand,
+    ]
+
+    for failure in failures {
+      let coordinator = makeWorkflowReadyCoordinator()
+      XCTAssertEqual(
+        coordinator.handle(.primaryWorkflowRequested),
+        [.loadWorkflowConfiguration]
+      )
+      XCTAssertEqual(
+        coordinator.handle(.workflowConfigurationLoadCompleted(.failed(failure))),
+        [.primaryWorkflowFailed(.configuration(failure))],
+        "configuration failure: \(failure)"
+      )
+      XCTAssertEqual(
+        coordinator.handle(
+          .ghosttyResolutionCompleted(
+            .found(
+              GhosttyApplication(
+                path: "/Applications/Ghostty.app",
+                version: "1.3.0",
+                isRunning: true
+              )
+            )
+          )
+        ),
+        [],
+        "configuration failure must stop before Ghostty resolution: \(failure)"
+      )
+    }
+  }
+
+  func testRunningGhosttyReusesDefaultHerdrSessionWithoutLaunchingAgain() {
+    let coordinator = makeCoordinatorResolvingGhostty()
+    let configuration = workflowConfiguration
+    let steps: [Step] = [
+      (
+        "a supported running Ghostty proceeds directly to AppleScript",
+        .ghosttyResolutionCompleted(
+          .found(
+            GhosttyApplication(
+              path: "/Applications/Ghostty.app",
+              version: "1.3.1",
+              isRunning: true
+            )
+          )
+        ),
+        [.ensureDefaultHerdrSession]
+      ),
+      (
+        "the existing default Herdr Session is reused",
+        .defaultHerdrSessionEnsureCompleted(.ready(.reused)),
+        [
+          .primaryWorkflowGhosttyReady(
+            PrimaryWorkflowContext(
+              configuration: configuration,
+              defaultHerdrSession: .reused
+            )
+          )
+        ]
+      ),
+    ]
+
+    assertEffects(steps, from: coordinator)
+  }
+
+  func testGhosttyFailuresStopAtTheirExactWorkflowStep() {
+    let missingGhostty = makeCoordinatorResolvingGhostty()
+    XCTAssertEqual(
+      missingGhostty.handle(.ghosttyResolutionCompleted(.notInstalled)),
+      [.primaryWorkflowFailed(.ghosttyNotInstalled)]
+    )
+    XCTAssertEqual(missingGhostty.handle(.ghosttyLaunchCompleted(.succeeded)), [])
+
+    let launchFailure = makeCoordinatorResolvingGhostty()
+    XCTAssertEqual(
+      launchFailure.handle(
+        .ghosttyResolutionCompleted(
+          .found(
+            GhosttyApplication(
+              path: "/Applications/Ghostty.app",
+              version: "1.3.0",
+              isRunning: false
+            )
+          )
+        )
+      ),
+      [.launchGhostty(at: "/Applications/Ghostty.app")]
+    )
+    XCTAssertEqual(
+      launchFailure.handle(.ghosttyLaunchCompleted(.failed)),
+      [.primaryWorkflowFailed(.ghosttyLaunchFailed)]
+    )
+    XCTAssertEqual(
+      launchFailure.handle(.defaultHerdrSessionEnsureCompleted(.ready(.started))),
+      []
+    )
+
+    let automationCases:
+      [(failure: GhosttyAutomationFailure, workflowFailure: PrimaryWorkflowFailure)] = [
+        (.denied, .ghosttyAutomationDenied),
+        (.unavailable, .ghosttyAutomationUnavailable),
+      ]
+    for testCase in automationCases {
+      let automationFailure = makeCoordinatorEnsuringDefaultHerdrSession()
+      XCTAssertEqual(
+        automationFailure.handle(
+          .defaultHerdrSessionEnsureCompleted(.automationFailed(testCase.failure))
+        ),
+        [.primaryWorkflowFailed(testCase.workflowFailure)]
+      )
+      XCTAssertEqual(
+        automationFailure.handle(.defaultHerdrSessionEnsureCompleted(.ready(.reused))),
+        []
+      )
+    }
+
+    let herdrFailure = makeCoordinatorEnsuringDefaultHerdrSession()
+    XCTAssertEqual(
+      herdrFailure.handle(.defaultHerdrSessionEnsureCompleted(.herdrUnavailable)),
+      [.primaryWorkflowFailed(.herdrUnavailable)]
+    )
+    XCTAssertEqual(
+      herdrFailure.handle(.defaultHerdrSessionEnsureCompleted(.ready(.started))),
+      []
+    )
+  }
+
+  func testGhosttyVersionUsesSemanticVersionMinimum() {
+    let cases: [(version: String?, effects: Effects)] = [
+      (nil, [.primaryWorkflowFailed(.ghosttyVersionUnavailable)]),
+      ("", [.primaryWorkflowFailed(.ghosttyVersionInvalid(""))]),
+      ("1.3", [.primaryWorkflowFailed(.ghosttyVersionInvalid("1.3"))]),
+      ("01.3.0", [.primaryWorkflowFailed(.ghosttyVersionInvalid("01.3.0"))]),
+      ("1.03.0", [.primaryWorkflowFailed(.ghosttyVersionInvalid("1.03.0"))]),
+      ("1.3.0-", [.primaryWorkflowFailed(.ghosttyVersionInvalid("1.3.0-"))]),
+      ("1.3.0+", [.primaryWorkflowFailed(.ghosttyVersionInvalid("1.3.0+"))]),
+      (
+        "1.3.1-alpha.01",
+        [.primaryWorkflowFailed(.ghosttyVersionInvalid("1.3.1-alpha.01"))]
+      ),
+      (
+        "1.2.99",
+        [
+          .primaryWorkflowFailed(
+            .ghosttyVersionUnsupported(found: "1.2.99", minimum: "1.3.0")
+          )
+        ]
+      ),
+      (
+        "1.3.0-beta.1",
+        [
+          .primaryWorkflowFailed(
+            .ghosttyVersionUnsupported(found: "1.3.0-beta.1", minimum: "1.3.0")
+          )
+        ]
+      ),
+      ("1.3.0", [.ensureDefaultHerdrSession]),
+      ("1.3.1-beta.1", [.ensureDefaultHerdrSession]),
+      ("1.3.0+build.1", [.ensureDefaultHerdrSession]),
+      ("2.0.0", [.ensureDefaultHerdrSession]),
+    ]
+
+    for testCase in cases {
+      let coordinator = makeCoordinatorResolvingGhostty()
+      let ghostty = GhosttyApplication(
+        path: "/Applications/Ghostty.app",
+        version: testCase.version,
+        isRunning: true
+      )
+      XCTAssertEqual(
+        coordinator.handle(.ghosttyResolutionCompleted(.found(ghostty))),
+        testCase.effects,
+        "Ghostty version: \(testCase.version ?? "missing")"
+      )
+    }
+  }
+
   private func assertEffects(_ steps: [Step], from coordinator: LaunchCoordinator) {
     for step in steps {
       XCTAssertEqual(coordinator.handle(step.event), step.effects, step.name)
@@ -144,6 +377,49 @@ final class LaunchCoordinatorTests: XCTestCase {
     for event in events {
       _ = coordinator.handle(event)
     }
+    return coordinator
+  }
+
+  private func makeWorkflowReadyCoordinator() -> LaunchCoordinator {
+    makeCoordinator(
+      after: [
+        .appLaunched,
+        .menuBarApplicationConfigurationCompleted(.succeeded),
+        .personalRecognizerChecked(.available),
+        .menuPresented(.personalRecognizerReady),
+      ]
+    )
+  }
+
+  private var workflowConfiguration: WorkflowConfiguration {
+    WorkflowConfiguration(
+      workspacePath: "/Users/developer/work/siglaunch",
+      piCommand: ["pi"]
+    )
+  }
+
+  private func makeCoordinatorResolvingGhostty() -> LaunchCoordinator {
+    let coordinator = makeWorkflowReadyCoordinator()
+    _ = coordinator.handle(.primaryWorkflowRequested)
+    _ = coordinator.handle(
+      .workflowConfigurationLoadCompleted(.loaded(workflowConfiguration))
+    )
+    return coordinator
+  }
+
+  private func makeCoordinatorEnsuringDefaultHerdrSession() -> LaunchCoordinator {
+    let coordinator = makeCoordinatorResolvingGhostty()
+    _ = coordinator.handle(
+      .ghosttyResolutionCompleted(
+        .found(
+          GhosttyApplication(
+            path: "/Applications/Ghostty.app",
+            version: "1.3.0",
+            isRunning: true
+          )
+        )
+      )
+    )
     return coordinator
   }
 }

@@ -1,20 +1,34 @@
 import AppKit
 import SiglaunchCore
 
+enum PrimaryWorkflowPresentation: Equatable {
+  case ghosttyReady
+  case failed(PrimaryWorkflowFailure)
+}
+
 @MainActor
 final class ProductionEffectAdapter {
   private let recognizerStore: PersonalRecognizerStore
+  private let workflowConfigurationStore: any WorkflowConfigurationLoading
+  private let ghosttyPlatformAdapter: any GhosttyPlatformAdapting
   private let eventSink: (AppEvent) -> Void
   private let menuSink: (MenuPresentation) -> Void
+  private let workflowSink: (PrimaryWorkflowPresentation?) -> Void
 
   init(
     recognizerStore: PersonalRecognizerStore,
+    workflowConfigurationStore: any WorkflowConfigurationLoading = WorkflowConfigurationStore(),
+    ghosttyPlatformAdapter: any GhosttyPlatformAdapting = GhosttyPlatformAdapter(),
     eventSink: @escaping (AppEvent) -> Void,
-    menuSink: @escaping (MenuPresentation) -> Void
+    menuSink: @escaping (MenuPresentation) -> Void,
+    workflowSink: @escaping (PrimaryWorkflowPresentation?) -> Void
   ) {
     self.recognizerStore = recognizerStore
+    self.workflowConfigurationStore = workflowConfigurationStore
+    self.ghosttyPlatformAdapter = ghosttyPlatformAdapter
     self.eventSink = eventSink
     self.menuSink = menuSink
+    self.workflowSink = workflowSink
   }
 
   func execute(_ effect: AppEffect) {
@@ -28,6 +42,25 @@ final class ProductionEffectAdapter {
     case .presentMenu(let presentation):
       menuSink(presentation)
       eventSink(.menuPresented(presentation))
+    case .loadWorkflowConfiguration:
+      workflowSink(nil)
+      eventSink(
+        .workflowConfigurationLoadCompleted(workflowConfigurationStore.load())
+      )
+    case .resolveGhostty:
+      eventSink(.ghosttyResolutionCompleted(ghosttyPlatformAdapter.resolve()))
+    case .launchGhostty(let path):
+      ghosttyPlatformAdapter.launch(at: path) { [weak self] result in
+        self?.eventSink(.ghosttyLaunchCompleted(result))
+      }
+    case .ensureDefaultHerdrSession:
+      ghosttyPlatformAdapter.ensureDefaultHerdrSession { [weak self] result in
+        self?.eventSink(.defaultHerdrSessionEnsureCompleted(result))
+      }
+    case .primaryWorkflowGhosttyReady:
+      workflowSink(.ghosttyReady)
+    case .primaryWorkflowFailed(let failure):
+      workflowSink(.failed(failure))
     case .terminateApplication:
       NSApplication.shared.terminate(nil)
     }

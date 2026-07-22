@@ -10,6 +10,7 @@ struct SiglaunchApplication: App {
     MenuBarExtra {
       SiglaunchMenu(
         presentation: runtime.menuPresentation,
+        primaryWorkflowPresentation: runtime.primaryWorkflowPresentation,
         onQuit: { runtime.send(.quitRequested) }
       )
     } label: {

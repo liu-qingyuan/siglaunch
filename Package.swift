@@ -21,5 +21,9 @@ let package = Package(
       name: "SiglaunchCoreTests",
       dependencies: ["SiglaunchCore"]
     ),
+    .testTarget(
+      name: "SiglaunchAppTests",
+      dependencies: ["SiglaunchApp", "SiglaunchCore"]
+    ),
   ]
 )
