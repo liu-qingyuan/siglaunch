@@ -2,7 +2,8 @@ import AppKit
 import SiglaunchCore
 
 enum PrimaryWorkflowPresentation: Equatable {
-  case ghosttyReady
+  case leadingPiAgentFocused
+  case noMatchingPiAgent
   case failed(PrimaryWorkflowFailure)
 }
 
@@ -11,6 +12,7 @@ final class ProductionEffectAdapter {
   private let recognizerStore: PersonalRecognizerStore
   private let workflowConfigurationStore: any WorkflowConfigurationLoading
   private let ghosttyPlatformAdapter: any GhosttyPlatformAdapting
+  private let herdrAgentAdapter: any HerdrAgentAdapting
   private let eventSink: (AppEvent) -> Void
   private let menuSink: (MenuPresentation) -> Void
   private let workflowSink: (PrimaryWorkflowPresentation?) -> Void
@@ -19,6 +21,7 @@ final class ProductionEffectAdapter {
     recognizerStore: PersonalRecognizerStore,
     workflowConfigurationStore: any WorkflowConfigurationLoading = WorkflowConfigurationStore(),
     ghosttyPlatformAdapter: any GhosttyPlatformAdapting = GhosttyPlatformAdapter(),
+    herdrAgentAdapter: any HerdrAgentAdapting = HerdrAgentAdapter(),
     eventSink: @escaping (AppEvent) -> Void,
     menuSink: @escaping (MenuPresentation) -> Void,
     workflowSink: @escaping (PrimaryWorkflowPresentation?) -> Void
@@ -26,6 +29,7 @@ final class ProductionEffectAdapter {
     self.recognizerStore = recognizerStore
     self.workflowConfigurationStore = workflowConfigurationStore
     self.ghosttyPlatformAdapter = ghosttyPlatformAdapter
+    self.herdrAgentAdapter = herdrAgentAdapter
     self.eventSink = eventSink
     self.menuSink = menuSink
     self.workflowSink = workflowSink
@@ -57,8 +61,18 @@ final class ProductionEffectAdapter {
       ghosttyPlatformAdapter.ensureDefaultHerdrSession { [weak self] result in
         self?.eventSink(.defaultHerdrSessionEnsureCompleted(result))
       }
-    case .primaryWorkflowGhosttyReady:
-      workflowSink(.ghosttyReady)
+    case .queryHerdrAgents:
+      herdrAgentAdapter.queryAgents { [weak self] result in
+        self?.eventSink(.herdrAgentQueryCompleted(result))
+      }
+    case .focusHerdrAgent(let paneID):
+      herdrAgentAdapter.focusAgent(paneID: paneID) { [weak self] result in
+        self?.eventSink(.herdrAgentFocusCompleted(result))
+      }
+    case .primaryWorkflowNoMatchingAgent:
+      workflowSink(.noMatchingPiAgent)
+    case .primaryWorkflowLeadingPiAgentFocused:
+      workflowSink(.leadingPiAgentFocused)
     case .primaryWorkflowFailed(let failure):
       workflowSink(.failed(failure))
     case .terminateApplication:

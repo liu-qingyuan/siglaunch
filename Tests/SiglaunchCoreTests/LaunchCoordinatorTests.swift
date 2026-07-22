@@ -133,7 +133,7 @@ final class LaunchCoordinatorTests: XCTestCase {
     }
   }
 
-  func testPrimaryWorkflowColdStartPreparesGhosttyAndDefaultHerdrSession() {
+  func testPrimaryWorkflowColdStartPreparesGhosttyAndQueriesAgents() {
     let coordinator = makeWorkflowReadyCoordinator()
     let configuration = WorkflowConfiguration(
       workspacePath: "/Users/developer/work/siglaunch",
@@ -166,20 +166,173 @@ final class LaunchCoordinatorTests: XCTestCase {
         [.ensureDefaultHerdrSession]
       ),
       (
-        "starting the default Herdr Session completes this Workflow stage",
+        "starting the default Herdr Session queries its Agents",
         .defaultHerdrSessionEnsureCompleted(.ready(.started)),
-        [
-          .primaryWorkflowGhosttyReady(
-            PrimaryWorkflowContext(
-              configuration: configuration,
-              defaultHerdrSession: .started
-            )
-          )
-        ]
+        [.queryHerdrAgents]
       ),
     ]
 
     assertEffects(steps, from: coordinator)
+  }
+
+  func testHerdrQuerySelectsLeadingPiAgentUsingCanonicalWorkspacePaths() {
+    let cases: [(name: String, agents: [HerdrAgent], paneID: String)] = [
+      (
+        "agent type is filtered before cwd matching",
+        [
+          HerdrAgent(
+            paneID: "pane-codex",
+            agent: "codex",
+            cwd: workflowConfiguration.workspacePath,
+            foregroundCwd: workflowConfiguration.workspacePath
+          ),
+          HerdrAgent(
+            paneID: "pane-leading-pi",
+            agent: "pi",
+            cwd: workflowConfiguration.workspacePath,
+            foregroundCwd: "/Users/developer"
+          ),
+        ],
+        "pane-leading-pi"
+      ),
+      (
+        "cwd uses the same canonical path rule as Workspace",
+        [
+          HerdrAgent(
+            paneID: "pane-canonical-cwd",
+            agent: "pi",
+            cwd: "/Users/developer/work/other/../siglaunch/",
+            foregroundCwd: nil
+          )
+        ],
+        "pane-canonical-cwd"
+      ),
+      (
+        "foreground cwd can match and original order wins",
+        [
+          HerdrAgent(
+            paneID: "pane-first",
+            agent: "pi",
+            cwd: "/Users/developer",
+            foregroundCwd: "/Users/developer/work/./siglaunch"
+          ),
+          HerdrAgent(
+            paneID: "pane-second",
+            agent: "pi",
+            cwd: workflowConfiguration.workspacePath,
+            foregroundCwd: nil
+          ),
+        ],
+        "pane-first"
+      ),
+    ]
+
+    for testCase in cases {
+      let coordinator = makeCoordinatorQueryingHerdrAgents()
+      XCTAssertEqual(
+        coordinator.handle(.herdrAgentQueryCompleted(.agents(testCase.agents))),
+        [.focusHerdrAgent(paneID: testCase.paneID)],
+        testCase.name
+      )
+    }
+  }
+
+  func testHerdrQueryWithoutMatchingAgentProducesColdStartResult() {
+    let coordinator = makeCoordinatorQueryingHerdrAgents()
+    let agents = [
+      HerdrAgent(
+        paneID: "pane-nonmatching-pi",
+        agent: "pi",
+        cwd: "/Users/developer/work/another-workspace",
+        foregroundCwd: nil
+      ),
+      HerdrAgent(
+        paneID: "pane-matching-codex",
+        agent: "codex",
+        cwd: workflowConfiguration.workspacePath,
+        foregroundCwd: nil
+      ),
+    ]
+
+    XCTAssertEqual(
+      coordinator.handle(.herdrAgentQueryCompleted(.agents(agents))),
+      [
+        .primaryWorkflowNoMatchingAgent(
+          PrimaryWorkflowContext(
+            configuration: workflowConfiguration,
+            defaultHerdrSession: .reused
+          )
+        )
+      ]
+    )
+    XCTAssertEqual(coordinator.handle(.herdrAgentQueryCompleted(.agents([]))), [])
+  }
+
+  func testHerdrQueryFailuresRemainDistinctAndStopTheWorkflow() {
+    let cases: [(queryResult: HerdrAgentQueryResult, failure: PrimaryWorkflowFailure)] = [
+      (.herdrUnavailable, .herdrUnavailable),
+      (.malformedOutput, .malformedHerdrOutput),
+    ]
+
+    for testCase in cases {
+      let coordinator = makeCoordinatorQueryingHerdrAgents()
+      XCTAssertEqual(
+        coordinator.handle(.herdrAgentQueryCompleted(testCase.queryResult)),
+        [.primaryWorkflowFailed(testCase.failure)]
+      )
+      XCTAssertEqual(
+        coordinator.handle(.herdrAgentQueryCompleted(.agents([]))),
+        [],
+        "query failure must terminate the current Workflow: \(testCase.queryResult)"
+      )
+    }
+  }
+
+  func testLeadingPiAgentFocusSuccessCompletesWorkflowOnce() {
+    let coordinator = makeCoordinatorQueryingHerdrAgents()
+    let agent = HerdrAgent(
+      paneID: "pane-leading-pi",
+      agent: "pi",
+      cwd: workflowConfiguration.workspacePath,
+      foregroundCwd: nil
+    )
+    XCTAssertEqual(
+      coordinator.handle(.herdrAgentQueryCompleted(.agents([agent]))),
+      [.focusHerdrAgent(paneID: agent.paneID)]
+    )
+
+    XCTAssertEqual(
+      coordinator.handle(.herdrAgentFocusCompleted(.succeeded)),
+      [
+        .primaryWorkflowLeadingPiAgentFocused(
+          LeadingPiAgentContext(
+            workflow: PrimaryWorkflowContext(
+              configuration: workflowConfiguration,
+              defaultHerdrSession: .reused
+            ),
+            agent: agent
+          )
+        )
+      ]
+    )
+    XCTAssertEqual(coordinator.handle(.herdrAgentFocusCompleted(.succeeded)), [])
+  }
+
+  func testLeadingPiAgentFocusFailureStopsWorkflow() {
+    let coordinator = makeCoordinatorQueryingHerdrAgents()
+    let agent = HerdrAgent(
+      paneID: "pane-leading-pi",
+      agent: "pi",
+      cwd: workflowConfiguration.workspacePath,
+      foregroundCwd: nil
+    )
+    _ = coordinator.handle(.herdrAgentQueryCompleted(.agents([agent])))
+
+    XCTAssertEqual(
+      coordinator.handle(.herdrAgentFocusCompleted(.failed)),
+      [.primaryWorkflowFailed(.herdrUnavailable)]
+    )
+    XCTAssertEqual(coordinator.handle(.herdrAgentFocusCompleted(.succeeded)), [])
   }
 
   func testPrimaryWorkflowConfigurationFailuresStopBeforeGhosttyResolution() {
@@ -222,7 +375,6 @@ final class LaunchCoordinatorTests: XCTestCase {
 
   func testRunningGhosttyReusesDefaultHerdrSessionWithoutLaunchingAgain() {
     let coordinator = makeCoordinatorResolvingGhostty()
-    let configuration = workflowConfiguration
     let steps: [Step] = [
       (
         "a supported running Ghostty proceeds directly to AppleScript",
@@ -238,16 +390,9 @@ final class LaunchCoordinatorTests: XCTestCase {
         [.ensureDefaultHerdrSession]
       ),
       (
-        "the existing default Herdr Session is reused",
+        "the existing default Herdr Session is reused before querying Agents",
         .defaultHerdrSessionEnsureCompleted(.ready(.reused)),
-        [
-          .primaryWorkflowGhosttyReady(
-            PrimaryWorkflowContext(
-              configuration: configuration,
-              defaultHerdrSession: .reused
-            )
-          )
-        ]
+        [.queryHerdrAgents]
       ),
     ]
 
@@ -420,6 +565,12 @@ final class LaunchCoordinatorTests: XCTestCase {
         )
       )
     )
+    return coordinator
+  }
+
+  private func makeCoordinatorQueryingHerdrAgents() -> LaunchCoordinator {
+    let coordinator = makeCoordinatorEnsuringDefaultHerdrSession()
+    _ = coordinator.handle(.defaultHerdrSessionEnsureCompleted(.ready(.reused)))
     return coordinator
   }
 }

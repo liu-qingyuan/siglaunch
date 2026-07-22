@@ -1,3 +1,5 @@
+import Foundation
+
 public enum PersonalRecognizerAvailability: Equatable, Sendable {
   case available
   case missing
@@ -69,6 +71,36 @@ public enum DefaultHerdrSessionEnsureResult: Equatable, Sendable {
   case herdrUnavailable
 }
 
+public struct HerdrAgent: Equatable, Sendable {
+  public let paneID: String
+  public let agent: String
+  public let cwd: String?
+  public let foregroundCwd: String?
+
+  public init(
+    paneID: String,
+    agent: String,
+    cwd: String?,
+    foregroundCwd: String?
+  ) {
+    self.paneID = paneID
+    self.agent = agent
+    self.cwd = cwd
+    self.foregroundCwd = foregroundCwd
+  }
+}
+
+public enum HerdrAgentQueryResult: Equatable, Sendable {
+  case agents([HerdrAgent])
+  case herdrUnavailable
+  case malformedOutput
+}
+
+public enum HerdrAgentFocusResult: Equatable, Sendable {
+  case succeeded
+  case failed
+}
+
 public enum PrimaryWorkflowFailure: Equatable, Sendable {
   case configuration(WorkflowConfigurationFailure)
   case ghosttyNotInstalled
@@ -79,6 +111,7 @@ public enum PrimaryWorkflowFailure: Equatable, Sendable {
   case ghosttyAutomationDenied
   case ghosttyAutomationUnavailable
   case herdrUnavailable
+  case malformedHerdrOutput
 }
 
 public struct PrimaryWorkflowContext: Equatable, Sendable {
@@ -94,6 +127,16 @@ public struct PrimaryWorkflowContext: Equatable, Sendable {
   }
 }
 
+public struct LeadingPiAgentContext: Equatable, Sendable {
+  public let workflow: PrimaryWorkflowContext
+  public let agent: HerdrAgent
+
+  public init(workflow: PrimaryWorkflowContext, agent: HerdrAgent) {
+    self.workflow = workflow
+    self.agent = agent
+  }
+}
+
 public enum AppEvent: Equatable, Sendable {
   case appLaunched
   case menuBarApplicationConfigurationCompleted(MenuBarApplicationConfigurationResult)
@@ -104,6 +147,8 @@ public enum AppEvent: Equatable, Sendable {
   case ghosttyResolutionCompleted(GhosttyResolutionResult)
   case ghosttyLaunchCompleted(GhosttyLaunchResult)
   case defaultHerdrSessionEnsureCompleted(DefaultHerdrSessionEnsureResult)
+  case herdrAgentQueryCompleted(HerdrAgentQueryResult)
+  case herdrAgentFocusCompleted(HerdrAgentFocusResult)
   case quitRequested
 }
 
@@ -120,7 +165,10 @@ public enum AppEffect: Equatable, Sendable {
   case resolveGhostty
   case launchGhostty(at: String)
   case ensureDefaultHerdrSession
-  case primaryWorkflowGhosttyReady(PrimaryWorkflowContext)
+  case queryHerdrAgents
+  case focusHerdrAgent(paneID: String)
+  case primaryWorkflowNoMatchingAgent(PrimaryWorkflowContext)
+  case primaryWorkflowLeadingPiAgentFocused(LeadingPiAgentContext)
   case primaryWorkflowFailed(PrimaryWorkflowFailure)
   case terminateApplication
 }
@@ -143,6 +191,8 @@ public final class LaunchCoordinator {
     case resolvingGhostty(WorkflowConfiguration)
     case launchingGhostty(WorkflowConfiguration)
     case ensuringDefaultHerdrSession(WorkflowConfiguration)
+    case queryingHerdrAgents(PrimaryWorkflowContext)
+    case focusingHerdrAgent(PrimaryWorkflowContext, HerdrAgent)
   }
 
   private var state: State = .awaitingLaunch
@@ -239,15 +289,52 @@ public final class LaunchCoordinator {
       .ensuringDefaultHerdrSession(let configuration),
       .defaultHerdrSessionEnsureCompleted(.ready(let session))
     ):
+      primaryWorkflowState = .queryingHerdrAgents(
+        PrimaryWorkflowContext(
+          configuration: configuration,
+          defaultHerdrSession: session
+        )
+      )
+      return [.queryHerdrAgents]
+
+    case (
+      .queryingHerdrAgents(let context),
+      .herdrAgentQueryCompleted(.agents(let agents))
+    ):
+      guard
+        let agent = Self.leadingPiAgent(
+          in: agents,
+          workspacePath: context.configuration.workspacePath
+        )
+      else {
+        primaryWorkflowState = .idle
+        return [.primaryWorkflowNoMatchingAgent(context)]
+      }
+      primaryWorkflowState = .focusingHerdrAgent(context, agent)
+      return [.focusHerdrAgent(paneID: agent.paneID)]
+
+    case (.queryingHerdrAgents, .herdrAgentQueryCompleted(.herdrUnavailable)):
+      primaryWorkflowState = .idle
+      return [.primaryWorkflowFailed(.herdrUnavailable)]
+
+    case (.queryingHerdrAgents, .herdrAgentQueryCompleted(.malformedOutput)):
+      primaryWorkflowState = .idle
+      return [.primaryWorkflowFailed(.malformedHerdrOutput)]
+
+    case (
+      .focusingHerdrAgent(let context, let agent),
+      .herdrAgentFocusCompleted(.succeeded)
+    ):
       primaryWorkflowState = .idle
       return [
-        .primaryWorkflowGhosttyReady(
-          PrimaryWorkflowContext(
-            configuration: configuration,
-            defaultHerdrSession: session
-          )
+        .primaryWorkflowLeadingPiAgentFocused(
+          LeadingPiAgentContext(workflow: context, agent: agent)
         )
       ]
+
+    case (.focusingHerdrAgent, .herdrAgentFocusCompleted(.failed)):
+      primaryWorkflowState = .idle
+      return [.primaryWorkflowFailed(.herdrUnavailable)]
 
     case (
       .ensuringDefaultHerdrSession,
@@ -270,4 +357,24 @@ public final class LaunchCoordinator {
     }
   }
 
+  private static func leadingPiAgent(
+    in agents: [HerdrAgent],
+    workspacePath: String
+  ) -> HerdrAgent? {
+    let workspacePath = canonicalPath(workspacePath)
+    return agents.first { agent in
+      guard agent.agent == "pi" else { return false }
+      return [agent.cwd, agent.foregroundCwd]
+        .compactMap { $0 }
+        .contains { canonicalPath($0) == workspacePath }
+    }
+  }
+
+  private static func canonicalPath(_ path: String) -> String {
+    let expandedPath = (path as NSString).expandingTildeInPath
+    return URL(fileURLWithPath: expandedPath)
+      .standardizedFileURL
+      .resolvingSymlinksInPath()
+      .path
+  }
 }

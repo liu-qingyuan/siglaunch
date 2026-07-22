@@ -27,6 +27,12 @@ absolute path from Siglaunch's `PATH`, `~/.local/bin`, `/opt/homebrew/bin`, or
 `/usr/local/bin`; Ghostty receives that path separately from its fixed surface
 command.
 
+After the default Herdr Session is ready, Siglaunch runs `herdr agent list`,
+keeps the original JSON order, and selects the first `pi` Agent whose canonical
+`cwd` or `foreground_cwd` matches the configured Workspace. It focuses that
+Leading Pi Agent through `herdr agent focus <pane_id>`; Siglaunch never manages
+the Agent process directly.
+
 ```bash
 swift run Siglaunch
 ```
@@ -44,4 +50,15 @@ against disposable or intentionally prepared live state:
 ```bash
 SIGLAUNCH_RUN_GHOSTTY_SMOKE=1 swift test \
   --filter GhosttyAppleScriptAdapterTests/testLiveGhosttyEnsuresDefaultHerdrSessionWhenOptedIn
+```
+
+The live Herdr focus smoke is also disabled by default. It requires a running
+Herdr server, a connected GUI client, and an existing Pi Agent in the selected
+Workspace. It changes live Herdr focus:
+
+```bash
+SIGLAUNCH_RUN_HERDR_FOCUS_SMOKE=1 \
+SIGLAUNCH_HERDR_FOCUS_WORKSPACE="$PWD" \
+swift test \
+  --filter HerdrAgentAdapterTests/testLiveHerdrFocusesWorkspaceLeadingPiAgentWhenOptedIn
 ```

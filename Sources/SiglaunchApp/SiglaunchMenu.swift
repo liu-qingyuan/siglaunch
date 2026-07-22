@@ -42,11 +42,17 @@ struct MenuStatusContent {
 extension PrimaryWorkflowPresentation {
   var content: MenuStatusContent {
     switch self {
-    case .ghosttyReady:
+    case .leadingPiAgentFocused:
       MenuStatusContent(
-        title: "Herdr Session Ready",
-        symbolName: "terminal",
+        title: "Leading Pi Agent Focused",
+        symbolName: "terminal.fill",
         detail: nil
+      )
+    case .noMatchingPiAgent:
+      MenuStatusContent(
+        title: "No Matching Pi Agent",
+        symbolName: "terminal",
+        detail: "No Pi Agent is running in the configured Workspace."
       )
     case .failed(let failure):
       MenuStatusContent(
@@ -86,7 +92,9 @@ extension PrimaryWorkflowFailure {
     case .ghosttyAutomationUnavailable:
       "Ghostty Automation is unavailable."
     case .herdrUnavailable:
-      "Herdr is unavailable or did not attach to its default Session."
+      "Herdr is unavailable or could not complete the requested command."
+    case .malformedHerdrOutput:
+      "Herdr returned malformed Agent JSON."
     }
   }
 }
