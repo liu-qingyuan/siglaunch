@@ -83,7 +83,83 @@ final class ProductionEffectAdapterTests: XCTestCase {
     XCTAssertEqual(ghosttyAdapter.launchedPaths, ["/Applications/Ghostty.app"])
     XCTAssertEqual(herdrAdapter.queryCount, 1)
     XCTAssertEqual(herdrAdapter.focusedPaneIDs, [leadingAgent.paneID])
+    XCTAssertEqual(herdrAdapter.startedConfigurations, [])
     XCTAssertEqual(workflowPresentations, [nil, .leadingPiAgentFocused])
+  }
+
+  func testFakeAdaptersDriveColdPiStartThroughCoordinatorLoop() {
+    let configuration = WorkflowConfiguration(
+      workspacePath: "/Users/developer/work/siglaunch",
+      piCommand: ["pi", "--model", "gpt-5"]
+    )
+    let configurationLoader = FakeWorkflowConfigurationLoader(
+      result: .loaded(configuration)
+    )
+    let ghosttyAdapter = FakeGhosttyPlatformAdapter(
+      resolution: .found(
+        GhosttyApplication(
+          path: "/Applications/Ghostty.app",
+          version: "1.3.0",
+          isRunning: true
+        )
+      ),
+      launchResult: .succeeded,
+      sessionResult: .ready(.reused)
+    )
+    let herdrAdapter = FakeHerdrAgentAdapter(
+      queryResult: .agents([]),
+      focusResult: .succeeded,
+      startResult: .succeeded
+    )
+    let coordinator = makeWorkflowReadyCoordinator()
+
+    var observedEffects: [AppEffect] = []
+    var workflowPresentations: [PrimaryWorkflowPresentation?] = []
+    var sendEvent: ((AppEvent) -> Void)!
+    var effectAdapter: ProductionEffectAdapter!
+    effectAdapter = ProductionEffectAdapter(
+      recognizerStore: PersonalRecognizerStore(),
+      workflowConfigurationStore: configurationLoader,
+      ghosttyPlatformAdapter: ghosttyAdapter,
+      herdrAgentAdapter: herdrAdapter,
+      eventSink: { event in sendEvent(event) },
+      menuSink: { _ in },
+      workflowSink: { workflowPresentations.append($0) }
+    )
+    sendEvent = { event in
+      let effects = coordinator.handle(event)
+      observedEffects.append(contentsOf: effects)
+      for effect in effects {
+        effectAdapter.execute(effect)
+      }
+    }
+
+    sendEvent(.primaryWorkflowRequested)
+
+    XCTAssertEqual(
+      observedEffects,
+      [
+        .loadWorkflowConfiguration,
+        .resolveGhostty,
+        .ensureDefaultHerdrSession,
+        .queryHerdrAgents,
+        .startPiAgent(
+          workspacePath: configuration.workspacePath,
+          command: configuration.piCommand
+        ),
+        .primaryWorkflowPiAgentStarted(
+          PrimaryWorkflowContext(
+            configuration: configuration,
+            defaultHerdrSession: .reused
+          )
+        ),
+      ]
+    )
+    XCTAssertEqual(ghosttyAdapter.launchedPaths, [])
+    XCTAssertEqual(herdrAdapter.queryCount, 1)
+    XCTAssertEqual(herdrAdapter.focusedPaneIDs, [])
+    XCTAssertEqual(herdrAdapter.startedConfigurations, [configuration])
+    XCTAssertEqual(workflowPresentations, [nil, .piAgentStarted])
   }
 
   func testFakeCameraAdapterDrivesMonitoringLifecycleThroughCoordinatorLoop() {
@@ -154,8 +230,9 @@ final class ProductionEffectAdapterTests: XCTestCase {
           .ensureDefaultHerdrSession,
           .queryHerdrAgents,
           .focusHerdrAgent,
-          .primaryWorkflowNoMatchingAgent,
+          .startPiAgent,
           .primaryWorkflowLeadingPiAgentFocused,
+          .primaryWorkflowPiAgentStarted,
           .primaryWorkflowFailed:
           true
         default:
@@ -778,15 +855,19 @@ private final class FakeGhosttyPlatformAdapter: GhosttyPlatformAdapting {
 private final class FakeHerdrAgentAdapter: HerdrAgentAdapting {
   let queryResult: HerdrAgentQueryResult
   let focusResult: HerdrAgentFocusResult
+  let startResult: HerdrAgentStartResult
   private(set) var queryCount = 0
   private(set) var focusedPaneIDs: [String] = []
+  private(set) var startedConfigurations: [WorkflowConfiguration] = []
 
   init(
     queryResult: HerdrAgentQueryResult,
-    focusResult: HerdrAgentFocusResult
+    focusResult: HerdrAgentFocusResult,
+    startResult: HerdrAgentStartResult = .succeeded
   ) {
     self.queryResult = queryResult
     self.focusResult = focusResult
+    self.startResult = startResult
   }
 
   func queryAgents(
@@ -802,5 +883,16 @@ private final class FakeHerdrAgentAdapter: HerdrAgentAdapting {
   ) {
     focusedPaneIDs.append(paneID)
     completion(focusResult)
+  }
+
+  func startPiAgent(
+    workspacePath: String,
+    command: [String],
+    completion: @escaping @MainActor @Sendable (HerdrAgentStartResult) -> Void
+  ) {
+    startedConfigurations.append(
+      WorkflowConfiguration(workspacePath: workspacePath, piCommand: command)
+    )
+    completion(startResult)
   }
 }

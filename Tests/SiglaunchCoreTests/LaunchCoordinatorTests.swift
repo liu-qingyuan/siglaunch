@@ -1175,7 +1175,7 @@ final class LaunchCoordinatorTests: XCTestCase {
     }
   }
 
-  func testHerdrQueryWithoutMatchingAgentProducesColdStartResult() {
+  func testHerdrQueryWithoutMatchingAgentStartsConfiguredPiInWorkspace() {
     let coordinator = makeCoordinatorQueryingHerdrAgents()
     let agents = [
       HerdrAgent(
@@ -1195,7 +1195,23 @@ final class LaunchCoordinatorTests: XCTestCase {
     XCTAssertEqual(
       coordinator.handle(.herdrAgentQueryCompleted(.agents(agents))),
       [
-        .primaryWorkflowNoMatchingAgent(
+        .startPiAgent(
+          workspacePath: workflowConfiguration.workspacePath,
+          command: workflowConfiguration.piCommand
+        )
+      ]
+    )
+    XCTAssertEqual(coordinator.handle(.herdrAgentQueryCompleted(.agents([]))), [])
+  }
+
+  func testPiStartSuccessCompletesWorkflowOnce() {
+    let coordinator = makeCoordinatorQueryingHerdrAgents()
+    _ = coordinator.handle(.herdrAgentQueryCompleted(.agents([])))
+
+    XCTAssertEqual(
+      coordinator.handle(.herdrAgentStartCompleted(.succeeded)),
+      [
+        .primaryWorkflowPiAgentStarted(
           PrimaryWorkflowContext(
             configuration: workflowConfiguration,
             defaultHerdrSession: .reused
@@ -1203,7 +1219,22 @@ final class LaunchCoordinatorTests: XCTestCase {
         )
       ]
     )
-    XCTAssertEqual(coordinator.handle(.herdrAgentQueryCompleted(.agents([]))), [])
+    XCTAssertEqual(coordinator.handle(.herdrAgentStartCompleted(.succeeded)), [])
+  }
+
+  func testPiStartFailureStopsWorkflowUntilANewTrigger() {
+    let coordinator = makeCoordinatorQueryingHerdrAgents()
+    _ = coordinator.handle(.herdrAgentQueryCompleted(.agents([])))
+
+    XCTAssertEqual(
+      coordinator.handle(.herdrAgentStartCompleted(.failed)),
+      [.primaryWorkflowFailed(.piStartFailed)]
+    )
+    XCTAssertEqual(coordinator.handle(.herdrAgentStartCompleted(.succeeded)), [])
+    XCTAssertEqual(
+      coordinator.handle(.primaryWorkflowRequested),
+      [.loadWorkflowConfiguration]
+    )
   }
 
   func testHerdrQueryFailuresRemainDistinctAndStopTheWorkflow() {

@@ -274,6 +274,11 @@ public enum HerdrAgentFocusResult: Equatable, Sendable {
   case failed
 }
 
+public enum HerdrAgentStartResult: Equatable, Sendable {
+  case succeeded
+  case failed
+}
+
 public enum PrimaryWorkflowFailure: Equatable, Sendable {
   case configuration(WorkflowConfigurationFailure)
   case ghosttyNotInstalled
@@ -285,6 +290,7 @@ public enum PrimaryWorkflowFailure: Equatable, Sendable {
   case ghosttyAutomationUnavailable
   case herdrUnavailable
   case malformedHerdrOutput
+  case piStartFailed
 }
 
 public struct PrimaryWorkflowContext: Equatable, Sendable {
@@ -328,6 +334,7 @@ public enum AppEvent: Equatable, Sendable {
   case defaultHerdrSessionEnsureCompleted(DefaultHerdrSessionEnsureResult)
   case herdrAgentQueryCompleted(HerdrAgentQueryResult)
   case herdrAgentFocusCompleted(HerdrAgentFocusResult)
+  case herdrAgentStartCompleted(HerdrAgentStartResult)
   case poseDatasetImportRequested
   case poseDatasetFolderSelectionCompleted(PoseDatasetFolderSelectionResult)
   case poseDatasetPreparationProgressed(PoseDatasetPreparationProgress)
@@ -364,8 +371,9 @@ public enum AppEffect: Equatable, Sendable {
   case ensureDefaultHerdrSession
   case queryHerdrAgents
   case focusHerdrAgent(paneID: String)
-  case primaryWorkflowNoMatchingAgent(PrimaryWorkflowContext)
+  case startPiAgent(workspacePath: String, command: [String])
   case primaryWorkflowLeadingPiAgentFocused(LeadingPiAgentContext)
+  case primaryWorkflowPiAgentStarted(PrimaryWorkflowContext)
   case primaryWorkflowFailed(PrimaryWorkflowFailure)
   case presentPoseDatasetImport(PoseDatasetImportPresentation?)
   case selectPoseDatasetFolder
@@ -458,6 +466,7 @@ public final class LaunchCoordinator {
     case ensuringDefaultHerdrSession(WorkflowConfiguration)
     case queryingHerdrAgents(PrimaryWorkflowContext)
     case focusingHerdrAgent(PrimaryWorkflowContext, HerdrAgent)
+    case startingPiAgent(PrimaryWorkflowContext)
   }
 
   private let recognitionClock: () -> TimeInterval
@@ -1404,8 +1413,13 @@ public final class LaunchCoordinator {
           workspacePath: context.configuration.workspacePath
         )
       else {
-        primaryWorkflowState = .idle
-        return [.primaryWorkflowNoMatchingAgent(context)]
+        primaryWorkflowState = .startingPiAgent(context)
+        return [
+          .startPiAgent(
+            workspacePath: context.configuration.workspacePath,
+            command: context.configuration.piCommand
+          )
+        ]
       }
       primaryWorkflowState = .focusingHerdrAgent(context, agent)
       return [.focusHerdrAgent(paneID: agent.paneID)]
@@ -1417,6 +1431,17 @@ public final class LaunchCoordinator {
     case (.queryingHerdrAgents, .herdrAgentQueryCompleted(.malformedOutput)):
       primaryWorkflowState = .idle
       return [.primaryWorkflowFailed(.malformedHerdrOutput)]
+
+    case (
+      .startingPiAgent(let context),
+      .herdrAgentStartCompleted(.succeeded)
+    ):
+      primaryWorkflowState = .idle
+      return [.primaryWorkflowPiAgentStarted(context)]
+
+    case (.startingPiAgent, .herdrAgentStartCompleted(.failed)):
+      primaryWorkflowState = .idle
+      return [.primaryWorkflowFailed(.piStartFailed)]
 
     case (
       .focusingHerdrAgent(let context, let agent),

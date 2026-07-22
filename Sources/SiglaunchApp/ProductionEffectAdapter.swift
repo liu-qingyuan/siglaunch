@@ -3,7 +3,7 @@ import SiglaunchCore
 
 enum PrimaryWorkflowPresentation: Equatable {
   case leadingPiAgentFocused
-  case noMatchingPiAgent
+  case piAgentStarted
   case failed(PrimaryWorkflowFailure)
 }
 
@@ -113,10 +113,17 @@ final class ProductionEffectAdapter {
       herdrAgentAdapter.focusAgent(paneID: paneID) { [weak self] result in
         self?.eventSink(.herdrAgentFocusCompleted(result))
       }
-    case .primaryWorkflowNoMatchingAgent:
-      workflowSink(.noMatchingPiAgent)
+    case .startPiAgent(let workspacePath, let command):
+      herdrAgentAdapter.startPiAgent(
+        workspacePath: workspacePath,
+        command: command
+      ) { [weak self] result in
+        self?.eventSink(.herdrAgentStartCompleted(result))
+      }
     case .primaryWorkflowLeadingPiAgentFocused:
       workflowSink(.leadingPiAgentFocused)
+    case .primaryWorkflowPiAgentStarted:
+      workflowSink(.piAgentStarted)
     case .primaryWorkflowFailed(let failure):
       workflowSink(.failed(failure))
     case .presentPoseDatasetImport(let presentation):

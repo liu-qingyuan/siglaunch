@@ -46,6 +46,19 @@ final class SiglaunchMenuTests: XCTestCase {
     XCTAssertFalse(RecognizerTrainingPresentation.succeeded.isInProgress)
   }
 
+  func testPiStartPresentationsRemainStepSpecific() {
+    let success = PrimaryWorkflowPresentation.piAgentStarted.content
+    XCTAssertEqual(success.title, "Pi Agent Started")
+    XCTAssertNil(success.detail)
+
+    let failure = PrimaryWorkflowPresentation.failed(.piStartFailed).content
+    XCTAssertEqual(failure.title, "Workflow Failed")
+    XCTAssertEqual(
+      failure.detail,
+      "Herdr could not start or confirm the configured Pi Agent."
+    )
+  }
+
   func testTrainingFailuresRemainStageSpecificInMenu() {
     let cases: [(RecognizerTrainingFailure, String)] = [
       (.training(.trainingFailed), "Create ML training failed."),

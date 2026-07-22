@@ -326,11 +326,11 @@ extension PrimaryWorkflowPresentation {
         symbolName: "terminal.fill",
         detail: nil
       )
-    case .noMatchingPiAgent:
+    case .piAgentStarted:
       MenuStatusContent(
-        title: "No Matching Pi Agent",
-        symbolName: "terminal",
-        detail: "No Pi Agent is running in the configured Workspace."
+        title: "Pi Agent Started",
+        symbolName: "terminal.fill",
+        detail: nil
       )
     case .failed(let failure):
       MenuStatusContent(
@@ -373,6 +373,8 @@ extension PrimaryWorkflowFailure {
       "Herdr is unavailable or could not complete the requested command."
     case .malformedHerdrOutput:
       "Herdr returned malformed Agent JSON."
+    case .piStartFailed:
+      "Herdr could not start or confirm the configured Pi Agent."
     }
   }
 }

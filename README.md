@@ -31,7 +31,13 @@ After the default Herdr Session is ready, Siglaunch runs `herdr agent list`,
 keeps the original JSON order, and selects the first `pi` Agent whose canonical
 `cwd` or `foreground_cwd` matches the configured Workspace. It focuses that
 Leading Pi Agent through `herdr agent focus <pane_id>`; Siglaunch never manages
-the Agent process directly.
+the Agent process directly. When no Agent matches, Siglaunch selects Herdr's
+versioned cold-start contract. Herdr 0.7.4 receives the Workspace and exact argv
+through `agent start --cwd`; Herdr 0.7.5 and newer creates the Workspace and
+starts canonical `pi` in its root pane with the configured arguments. Both paths
+require Herdr to confirm the same complete argv. Siglaunch never joins that argv
+into a shell command or starts Pi itself. On Herdr 0.7.5 and newer,
+`pi.command[0]` must be `pi` because Herdr owns canonical executable selection.
 
 ```bash
 swift run Siglaunch
@@ -61,6 +67,19 @@ SIGLAUNCH_RUN_HERDR_FOCUS_SMOKE=1 \
 SIGLAUNCH_HERDR_FOCUS_WORKSPACE="$PWD" \
 swift test \
   --filter HerdrAgentAdapterTests/testLiveHerdrFocusesWorkspaceLeadingPiAgentWhenOptedIn
+```
+
+The live Herdr cold-start smoke is disabled by default. It creates a real Pi
+Agent through the installed supported Herdr contract and intentionally leaves
+the resulting Herdr state in place. Run it only with a connected GUI client and
+an explicitly prepared Workspace and argv:
+
+```bash
+SIGLAUNCH_RUN_HERDR_START_SMOKE=1 \
+SIGLAUNCH_HERDR_START_WORKSPACE="$PWD" \
+SIGLAUNCH_HERDR_START_COMMAND_JSON='["pi"]' \
+swift test \
+  --filter HerdrAgentAdapterTests/testLiveHerdrStartsConfiguredPiAgentWhenOptedIn
 ```
 
 Recognizer Training consumes only the normalized local samples produced by Pose
