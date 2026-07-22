@@ -12,9 +12,12 @@ struct SiglaunchApplication: App {
         presentation: runtime.menuPresentation,
         primaryWorkflowPresentation: runtime.primaryWorkflowPresentation,
         poseDatasetImportPresentation: runtime.poseDatasetImportPresentation,
+        recognizerTrainingPresentation: runtime.recognizerTrainingPresentation,
         onPauseMonitoring: runtime.pauseMonitoring,
         onResumeMonitoring: runtime.resumeMonitoring,
         onImportPoseDataset: runtime.importPoseDataset,
+        onStartRecognizerTraining: runtime.startRecognizerTraining,
+        onCancelRecognizerTraining: runtime.cancelRecognizerTraining,
         onQuit: { runtime.send(.quitRequested) }
       )
     } label: {

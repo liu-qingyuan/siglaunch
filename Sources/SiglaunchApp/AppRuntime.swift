@@ -6,6 +6,7 @@ final class AppRuntime: ObservableObject {
   @Published private(set) var menuPresentation: MenuPresentation?
   @Published private(set) var primaryWorkflowPresentation: PrimaryWorkflowPresentation?
   @Published private(set) var poseDatasetImportPresentation: PoseDatasetImportPresentation?
+  @Published private(set) var recognizerTrainingPresentation: RecognizerTrainingPresentation?
 
   private let coordinator = LaunchCoordinator()
   private lazy var effectAdapter = ProductionEffectAdapter(
@@ -19,11 +20,17 @@ final class AppRuntime: ObservableObject {
     },
     poseDatasetSink: { [weak self] presentation in
       self?.poseDatasetImportPresentation = presentation
+    },
+    recognizerTrainingSink: { [weak self] presentation in
+      self?.recognizerTrainingPresentation = presentation
     }
   )
 
   var menuBarSymbol: String {
-    menuPresentation?.content.symbolName ?? "viewfinder.circle"
+    if recognizerTrainingPresentation?.isInProgress == true {
+      return recognizerTrainingPresentation?.content.symbolName ?? "cpu"
+    }
+    return menuPresentation?.content.symbolName ?? "viewfinder.circle"
   }
 
   init() {
@@ -46,5 +53,13 @@ final class AppRuntime: ObservableObject {
 
   func importPoseDataset() {
     send(.poseDatasetImportRequested)
+  }
+
+  func startRecognizerTraining() {
+    send(.recognizerTrainingRequested)
+  }
+
+  func cancelRecognizerTraining() {
+    send(.recognizerTrainingCancellationRequested)
   }
 }

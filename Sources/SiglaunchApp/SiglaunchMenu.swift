@@ -5,13 +5,23 @@ struct SiglaunchMenu: View {
   let presentation: MenuPresentation?
   let primaryWorkflowPresentation: PrimaryWorkflowPresentation?
   let poseDatasetImportPresentation: PoseDatasetImportPresentation?
+  let recognizerTrainingPresentation: RecognizerTrainingPresentation?
   let onPauseMonitoring: () -> Void
   let onResumeMonitoring: () -> Void
   let onImportPoseDataset: () -> Void
+  let onStartRecognizerTraining: () -> Void
+  let onCancelRecognizerTraining: () -> Void
   let onQuit: () -> Void
 
   var body: some View {
-    if let content = presentation?.content {
+    if let content = recognizerTrainingPresentation?.content,
+      recognizerTrainingPresentation?.isInProgress == true
+    {
+      Label(content.title, systemImage: content.symbolName)
+      if let detail = content.detail {
+        Text(detail)
+      }
+    } else if let content = presentation?.content {
       Label(content.title, systemImage: content.symbolName)
       if let detail = content.detail {
         Text(detail)
@@ -28,7 +38,19 @@ struct SiglaunchMenu: View {
       }
     }
 
-    if let content = poseDatasetImportPresentation?.content {
+    if recognizerTrainingPresentation?.isInProgress != true,
+      let content = poseDatasetImportPresentation?.content
+    {
+      Divider()
+      Label(content.title, systemImage: content.symbolName)
+      if let detail = content.detail {
+        Text(detail)
+      }
+    }
+
+    if let content = recognizerTrainingPresentation?.content,
+      recognizerTrainingPresentation?.isInProgress != true
+    {
       Divider()
       Label(content.title, systemImage: content.symbolName)
       if let detail = content.detail {
@@ -38,25 +60,43 @@ struct SiglaunchMenu: View {
 
     Divider()
 
-    switch presentation {
-    case .activeMonitoring, .awaitingCameraAuthorization, .captureInterrupted,
-      .cameraUnavailable:
-      Button(action: onPauseMonitoring) {
-        Label("Pause Monitoring", systemImage: "pause.fill")
+    if recognizerTrainingPresentation?.isInProgress != true {
+      switch presentation {
+      case .activeMonitoring, .awaitingCameraAuthorization, .captureInterrupted,
+        .cameraUnavailable:
+        Button(action: onPauseMonitoring) {
+          Label("Pause Monitoring", systemImage: "pause.fill")
+        }
+      case .pausedMonitoring:
+        Button(action: onResumeMonitoring) {
+          Label("Resume Monitoring", systemImage: "play.fill")
+        }
+      default:
+        EmptyView()
       }
-    case .pausedMonitoring:
-      Button(action: onResumeMonitoring) {
-        Label("Resume Monitoring", systemImage: "play.fill")
-      }
-    default:
-      EmptyView()
     }
 
-    if presentation == .setupRequired {
+    if canImportPoseDataset {
       Button(action: onImportPoseDataset) {
         Label("Import Pose Dataset", systemImage: "folder.badge.plus")
       }
-      .disabled(poseDatasetImportPresentation?.isInProgress == true)
+      .disabled(
+        poseDatasetImportPresentation?.isInProgress == true
+          || recognizerTrainingPresentation?.isInProgress == true
+      )
+    }
+
+    if hasReadyTrainingInput {
+      Button(action: onStartRecognizerTraining) {
+        Label("Train Personal Recognizer", systemImage: "cpu")
+      }
+      .disabled(recognizerTrainingPresentation?.isInProgress == true)
+    }
+
+    if recognizerTrainingPresentation?.isCancellable == true {
+      Button(action: onCancelRecognizerTraining) {
+        Label("Cancel Training", systemImage: "xmark.circle")
+      }
     }
 
     Button(action: onQuit) {
@@ -64,12 +104,143 @@ struct SiglaunchMenu: View {
     }
     .keyboardShortcut("q")
   }
+
+  private var canImportPoseDataset: Bool {
+    switch presentation {
+    case .activeMonitoring, .pausedMonitoring, .setupRequired:
+      true
+    default:
+      false
+    }
+  }
+
+  private var hasReadyTrainingInput: Bool {
+    if case .ready = poseDatasetImportPresentation {
+      return true
+    }
+    return false
+  }
 }
 
 struct MenuStatusContent {
   let title: String
   let symbolName: String
   let detail: String?
+}
+
+private struct RecognizerTrainingMenuDescriptor {
+  let content: MenuStatusContent
+  let isInProgress: Bool
+  let isCancellable: Bool
+
+  init(
+    title: String,
+    symbolName: String,
+    detail: String? = nil,
+    isInProgress: Bool,
+    isCancellable: Bool = false
+  ) {
+    content = MenuStatusContent(
+      title: title,
+      symbolName: symbolName,
+      detail: detail
+    )
+    self.isInProgress = isInProgress
+    self.isCancellable = isCancellable
+  }
+}
+
+extension RecognizerTrainingPresentation {
+  var isInProgress: Bool { menuDescriptor.isInProgress }
+
+  var isCancellable: Bool { menuDescriptor.isCancellable }
+
+  var content: MenuStatusContent { menuDescriptor.content }
+
+  private var menuDescriptor: RecognizerTrainingMenuDescriptor {
+    switch self {
+    case .preparing:
+      RecognizerTrainingMenuDescriptor(
+        title: "Preparing Recognizer Training",
+        symbolName: "video.slash",
+        detail: "Releasing the camera.",
+        isInProgress: true,
+        isCancellable: true
+      )
+    case .training(let progress):
+      RecognizerTrainingMenuDescriptor(
+        title: "Training Personal Recognizer",
+        symbolName: "cpu",
+        detail: progress.map {
+          "\(Int(($0.fractionCompleted * 100).rounded()))% complete"
+        },
+        isInProgress: true,
+        isCancellable: true
+      )
+    case .cancelling:
+      RecognizerTrainingMenuDescriptor(
+        title: "Cancelling Recognizer Training",
+        symbolName: "xmark.circle",
+        isInProgress: true
+      )
+    case .saving:
+      RecognizerTrainingMenuDescriptor(
+        title: "Saving Personal Recognizer",
+        symbolName: "square.and.arrow.down",
+        isInProgress: true
+      )
+    case .replacing:
+      RecognizerTrainingMenuDescriptor(
+        title: "Enabling Personal Recognizer",
+        symbolName: "arrow.triangle.2.circlepath",
+        isInProgress: true
+      )
+    case .succeeded:
+      RecognizerTrainingMenuDescriptor(
+        title: "Personal Recognizer Ready",
+        symbolName: "checkmark.circle",
+        isInProgress: false
+      )
+    case .cancelled:
+      RecognizerTrainingMenuDescriptor(
+        title: "Recognizer Training Cancelled",
+        symbolName: "xmark.circle",
+        isInProgress: false
+      )
+    case .failed(let failure):
+      RecognizerTrainingMenuDescriptor(
+        title: "Recognizer Training Failed",
+        symbolName: "exclamationmark.triangle",
+        detail: failure.detail,
+        isInProgress: false
+      )
+    }
+  }
+}
+
+extension RecognizerTrainingFailure {
+  fileprivate var detail: String {
+    switch self {
+    case .training(.invalidTrainingInput):
+      "Validated training input is unavailable."
+    case .training(.trainingFailed):
+      "Create ML training failed."
+    case .training(.outputUnavailable):
+      "The trained model artifact could not be saved locally."
+    case .candidateSave(.artifactUnavailable):
+      "The trained model artifact is unavailable."
+    case .candidateSave(.storageUnavailable):
+      "Personal Recognizer storage is unavailable."
+    case .candidateSave(.compilationFailed):
+      "The Personal Recognizer could not be compiled."
+    case .candidateSave(.modelValidationFailed):
+      "The compiled Personal Recognizer could not be loaded."
+    case .modelReplacement(.candidateUnavailable):
+      "The saved Personal Recognizer candidate is unavailable."
+    case .modelReplacement(.replacementFailed):
+      "The active Personal Recognizer could not be replaced."
+    }
+  }
 }
 
 extension PrimaryWorkflowPresentation {

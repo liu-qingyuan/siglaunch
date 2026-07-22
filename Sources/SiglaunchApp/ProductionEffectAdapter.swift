@@ -9,8 +9,9 @@ enum PrimaryWorkflowPresentation: Equatable {
 
 @MainActor
 final class ProductionEffectAdapter {
-  private let recognizerStore: PersonalRecognizerStore
+  private let recognizerStore: any PersonalRecognizerStoring
   private let cameraAdapter: any CameraAdapting
+  private let recognizerTrainer: any RecognizerTrainingAdapting
   private let workflowConfigurationStore: any WorkflowConfigurationLoading
   private let ghosttyPlatformAdapter: any GhosttyPlatformAdapting
   private let herdrAgentAdapter: any HerdrAgentAdapting
@@ -20,10 +21,12 @@ final class ProductionEffectAdapter {
   private let menuSink: (MenuPresentation) -> Void
   private let workflowSink: (PrimaryWorkflowPresentation?) -> Void
   private let poseDatasetSink: (PoseDatasetImportPresentation?) -> Void
+  private let recognizerTrainingSink: (RecognizerTrainingPresentation?) -> Void
 
   init(
-    recognizerStore: PersonalRecognizerStore,
+    recognizerStore: any PersonalRecognizerStoring,
     cameraAdapter: any CameraAdapting = ProductionCameraAdapter(),
+    recognizerTrainer: any RecognizerTrainingAdapting = CreateMLRecognizerTrainingAdapter(),
     workflowConfigurationStore: any WorkflowConfigurationLoading = WorkflowConfigurationStore(),
     ghosttyPlatformAdapter: any GhosttyPlatformAdapting = GhosttyPlatformAdapter(),
     herdrAgentAdapter: any HerdrAgentAdapting = HerdrAgentAdapter(),
@@ -32,10 +35,12 @@ final class ProductionEffectAdapter {
     eventSink: @escaping (AppEvent) -> Void,
     menuSink: @escaping (MenuPresentation) -> Void,
     workflowSink: @escaping (PrimaryWorkflowPresentation?) -> Void,
-    poseDatasetSink: @escaping (PoseDatasetImportPresentation?) -> Void = { _ in }
+    poseDatasetSink: @escaping (PoseDatasetImportPresentation?) -> Void = { _ in },
+    recognizerTrainingSink: @escaping (RecognizerTrainingPresentation?) -> Void = { _ in }
   ) {
     self.recognizerStore = recognizerStore
     self.cameraAdapter = cameraAdapter
+    self.recognizerTrainer = recognizerTrainer
     self.workflowConfigurationStore = workflowConfigurationStore
     self.ghosttyPlatformAdapter = ghosttyPlatformAdapter
     self.herdrAgentAdapter = herdrAgentAdapter
@@ -45,6 +50,7 @@ final class ProductionEffectAdapter {
     self.menuSink = menuSink
     self.workflowSink = workflowSink
     self.poseDatasetSink = poseDatasetSink
+    self.recognizerTrainingSink = recognizerTrainingSink
   }
 
   func execute(_ effect: AppEffect) {
@@ -108,6 +114,32 @@ final class ProductionEffectAdapter {
           await self?.sendPoseDatasetProgress(progress)
         }
         self?.eventSink(.poseDatasetPreparationCompleted(result))
+      }
+    case .presentRecognizerTraining(let presentation):
+      recognizerTrainingSink(presentation)
+    case .startRecognizerTraining(let input):
+      recognizerTrainer.start(
+        with: input,
+        progress: { [weak self] progress in
+          self?.eventSink(.recognizerTrainingProgressed(progress))
+        },
+        completion: { [weak self] result in
+          self?.eventSink(.recognizerTrainingCompleted(result))
+        }
+      )
+    case .cancelRecognizerTraining:
+      recognizerTrainer.cancel()
+    case .savePersonalRecognizerCandidate(let artifact):
+      let recognizerStore = recognizerStore
+      Task { [weak self] in
+        let result = await recognizerStore.saveCandidate(from: artifact)
+        self?.eventSink(.personalRecognizerCandidateSaveCompleted(result))
+      }
+    case .replacePersonalRecognizer(let candidate):
+      let recognizerStore = recognizerStore
+      Task { [weak self] in
+        let result = await recognizerStore.replaceActiveModel(with: candidate)
+        self?.eventSink(.personalRecognizerReplacementCompleted(result))
       }
     case .terminateApplication:
       NSApplication.shared.terminate(nil)

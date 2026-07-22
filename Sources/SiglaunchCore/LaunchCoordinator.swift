@@ -199,6 +199,12 @@ public enum AppEvent: Equatable, Sendable {
   case poseDatasetFolderSelectionCompleted(PoseDatasetFolderSelectionResult)
   case poseDatasetPreparationProgressed(PoseDatasetPreparationProgress)
   case poseDatasetPreparationCompleted(PoseDatasetPreparationResult)
+  case recognizerTrainingRequested
+  case recognizerTrainingCancellationRequested
+  case recognizerTrainingProgressed(RecognizerTrainingProgress)
+  case recognizerTrainingCompleted(RecognizerTrainingResult)
+  case personalRecognizerCandidateSaveCompleted(PersonalRecognizerCandidateSaveResult)
+  case personalRecognizerReplacementCompleted(PersonalRecognizerReplacementResult)
   case quitRequested
 }
 
@@ -229,6 +235,11 @@ public enum AppEffect: Equatable, Sendable {
   case presentPoseDatasetImport(PoseDatasetImportPresentation?)
   case selectPoseDatasetFolder
   case preparePoseDataset(at: String)
+  case presentRecognizerTraining(RecognizerTrainingPresentation?)
+  case startRecognizerTraining(PoseDatasetTrainingInput)
+  case cancelRecognizerTraining
+  case savePersonalRecognizerCandidate(RecognizerTrainingArtifact)
+  case replacePersonalRecognizer(PersonalRecognizerCandidate)
   case terminateApplication
 }
 
@@ -247,6 +258,30 @@ public final class LaunchCoordinator {
     case sleeping(WakeAction, wakeReceived: Bool)
     case unavailable(CameraUnavailableReason)
     case terminated
+  }
+
+  private enum MonitoringPoseDatasetState: Equatable {
+    case idle
+    case choosingFolder
+    case validating
+    case ready
+  }
+
+  private enum RecognizerTrainingPriorState {
+    case activeMonitoring
+    case pausedMonitoring
+    case setupRequired
+  }
+
+  private struct RecognizerTrainingContext {
+    let input: PoseDatasetTrainingInput
+    let priorState: RecognizerTrainingPriorState
+  }
+
+  private enum RecognizerTrainingOutcome {
+    case succeeded
+    case cancelled
+    case failed(RecognizerTrainingFailure)
   }
 
   private enum MonitoringState {
@@ -270,6 +305,13 @@ public final class LaunchCoordinator {
     case choosingPoseDatasetFolder
     case validatingPoseDataset
     case poseDatasetReady(PoseDatasetTrainingInput)
+    case suspendingRecognizerTraining(RecognizerTrainingContext)
+    case trainingRecognizer(RecognizerTrainingContext)
+    case cancellingRecognizerTrainingBeforeStart(RecognizerTrainingContext)
+    case cancellingRecognizerTraining(RecognizerTrainingContext)
+    case savingPersonalRecognizer(RecognizerTrainingContext)
+    case replacingPersonalRecognizer(RecognizerTrainingContext)
+    case terminatingAfterRecognizerTrainingCameraRelease
     case terminated
   }
 
@@ -285,10 +327,16 @@ public final class LaunchCoordinator {
 
   private var state: State = .awaitingLaunch
   private var primaryWorkflowState: PrimaryWorkflowState = .idle
+  private var monitoringPoseDatasetState: MonitoringPoseDatasetState = .idle
+  private var validatedTrainingInput: PoseDatasetTrainingInput?
 
   public init() {}
 
   public func handle(_ event: AppEvent) -> Effects {
+    if let effects = handleMonitoringPoseDataset(event) {
+      return effects
+    }
+
     switch (state, event) {
     case (.awaitingLaunch, .appLaunched):
       state = .configuringMenuBarApplication
@@ -311,10 +359,11 @@ public final class LaunchCoordinator {
     case (
       .monitoring(.awaitingAuthorization),
       .camera(.authorizationChanged(.authorized))
-    ), (
-      .monitoring(.unavailable),
-      .camera(.authorizationChanged(.authorized))
-    ):
+    ),
+      (
+        .monitoring(.unavailable),
+        .camera(.authorizationChanged(.authorized))
+      ):
       state = .monitoring(.startingCapture)
       return [.camera(.startBuiltInCamera)]
 
@@ -355,20 +404,22 @@ public final class LaunchCoordinator {
     case (
       .monitoring(.startingCapture),
       .camera(.captureStartCompleted(.succeeded))
-    ), (
-      .monitoring(.rebuildingCapture),
-      .camera(.captureStartCompleted(.succeeded))
-    ):
+    ),
+      (
+        .monitoring(.rebuildingCapture),
+        .camera(.captureStartCompleted(.succeeded))
+      ):
       state = .monitoring(.active)
       return [.presentMenu(.activeMonitoring)]
 
     case (
       .monitoring(.startingCapture),
       .camera(.captureStartCompleted(.failed(let failure)))
-    ), (
-      .monitoring(.rebuildingCapture),
-      .camera(.captureStartCompleted(.failed(let failure)))
-    ):
+    ),
+      (
+        .monitoring(.rebuildingCapture),
+        .camera(.captureStartCompleted(.failed(let failure)))
+      ):
       let reason = CameraUnavailableReason.capture(failure)
       state = .monitoring(.unavailable(reason))
       return [.presentMenu(.cameraUnavailable(reason))]
@@ -446,10 +497,11 @@ public final class LaunchCoordinator {
     case (
       .monitoring(.releasing(.sleeping(let action, wakeReceived: true))),
       .camera(.released)
-    ), (
-      .monitoring(.sleeping(let action)),
-      .camera(.systemDidWake)
-    ):
+    ),
+      (
+        .monitoring(.sleeping(let action)),
+        .camera(.systemDidWake)
+      ):
       return resumeAfterSleep(action)
 
     case (
@@ -553,8 +605,149 @@ public final class LaunchCoordinator {
       .validatingPoseDataset,
       .poseDatasetPreparationCompleted(.succeeded(let input))
     ):
+      validatedTrainingInput = input
       state = .poseDatasetReady(input)
       return [.presentPoseDatasetImport(.ready(input))]
+
+    case (.poseDatasetReady(let input), .recognizerTrainingRequested):
+      let context = RecognizerTrainingContext(
+        input: input,
+        priorState: .setupRequired
+      )
+      state = .trainingRecognizer(context)
+      return [
+        .presentRecognizerTraining(.training(nil)),
+        .startRecognizerTraining(input),
+      ]
+
+    case (.monitoring(.active), .recognizerTrainingRequested):
+      guard let input = validatedTrainingInput else { return [] }
+      let context = RecognizerTrainingContext(
+        input: input,
+        priorState: .activeMonitoring
+      )
+      state = .suspendingRecognizerTraining(context)
+      return [
+        .presentRecognizerTraining(.preparing),
+        .clearRecognitionEvidence,
+        .camera(.stopAndReleaseCamera),
+      ]
+
+    case (.monitoring(.paused), .recognizerTrainingRequested):
+      guard let input = validatedTrainingInput else { return [] }
+      let context = RecognizerTrainingContext(
+        input: input,
+        priorState: .pausedMonitoring
+      )
+      state = .trainingRecognizer(context)
+      return [
+        .presentRecognizerTraining(.training(nil)),
+        .startRecognizerTraining(input),
+      ]
+
+    case (
+      .suspendingRecognizerTraining(let context),
+      .camera(.released)
+    ):
+      state = .trainingRecognizer(context)
+      return [
+        .presentRecognizerTraining(.training(nil)),
+        .startRecognizerTraining(context.input),
+      ]
+
+    case (
+      .suspendingRecognizerTraining(let context),
+      .recognizerTrainingCancellationRequested
+    ):
+      state = .cancellingRecognizerTrainingBeforeStart(context)
+      return [.presentRecognizerTraining(.cancelling)]
+
+    case (
+      .cancellingRecognizerTrainingBeforeStart(let context),
+      .camera(.released)
+    ):
+      return restoreAfterRecognizerTraining(context, outcome: .cancelled)
+
+    case (
+      .trainingRecognizer,
+      .recognizerTrainingProgressed(let progress)
+    ):
+      return [.presentRecognizerTraining(.training(progress))]
+
+    case (
+      .trainingRecognizer(let context),
+      .recognizerTrainingCancellationRequested
+    ):
+      state = .cancellingRecognizerTraining(context)
+      return [
+        .presentRecognizerTraining(.cancelling),
+        .cancelRecognizerTraining,
+      ]
+
+    case (
+      .cancellingRecognizerTraining(let context),
+      .recognizerTrainingCompleted
+    ):
+      return restoreAfterRecognizerTraining(context, outcome: .cancelled)
+
+    case (
+      .trainingRecognizer(let context),
+      .recognizerTrainingCompleted(.succeeded(let artifact))
+    ):
+      state = .savingPersonalRecognizer(context)
+      return [
+        .presentRecognizerTraining(.saving),
+        .savePersonalRecognizerCandidate(artifact),
+      ]
+
+    case (
+      .trainingRecognizer(let context),
+      .recognizerTrainingCompleted(.failed(let failure))
+    ):
+      return restoreAfterRecognizerTraining(
+        context,
+        outcome: .failed(.training(failure))
+      )
+
+    case (
+      .trainingRecognizer(let context),
+      .recognizerTrainingCompleted(.cancelled)
+    ):
+      return restoreAfterRecognizerTraining(context, outcome: .cancelled)
+
+    case (
+      .savingPersonalRecognizer(let context),
+      .personalRecognizerCandidateSaveCompleted(.succeeded(let candidate))
+    ):
+      state = .replacingPersonalRecognizer(context)
+      return [
+        .presentRecognizerTraining(.replacing),
+        .replacePersonalRecognizer(candidate),
+      ]
+
+    case (
+      .savingPersonalRecognizer(let context),
+      .personalRecognizerCandidateSaveCompleted(.failed(let failure))
+    ):
+      return restoreAfterRecognizerTraining(
+        context,
+        outcome: .failed(.candidateSave(failure))
+      )
+
+    case (
+      .replacingPersonalRecognizer(let context),
+      .personalRecognizerReplacementCompleted(.succeeded)
+    ):
+      return restoreAfterRecognizerTraining(context, outcome: .succeeded)
+
+    case (
+      .replacingPersonalRecognizer(let context),
+      .personalRecognizerReplacementCompleted(.failed(let failure))
+    ):
+      return restoreAfterRecognizerTraining(
+        context,
+        outcome: .failed(.modelReplacement(failure))
+      )
 
     case (
       .validatingPoseDataset,
@@ -562,6 +755,39 @@ public final class LaunchCoordinator {
     ):
       state = .setupRequired
       return [.presentPoseDatasetImport(.failed(failure))]
+
+    case (.suspendingRecognizerTraining, .quitRequested),
+      (
+        .cancellingRecognizerTrainingBeforeStart,
+        .quitRequested
+      ):
+      state = .terminatingAfterRecognizerTrainingCameraRelease
+      primaryWorkflowState = .idle
+      return []
+
+    case (
+      .terminatingAfterRecognizerTrainingCameraRelease,
+      .camera(.released)
+    ):
+      state = .terminated
+      return [.terminateApplication]
+
+    case (.terminatingAfterRecognizerTrainingCameraRelease, .quitRequested):
+      return []
+
+    case (.trainingRecognizer, .quitRequested):
+      state = .terminated
+      primaryWorkflowState = .idle
+      return [.cancelRecognizerTraining, .terminateApplication]
+
+    case (
+      .cancellingRecognizerTraining,
+      .quitRequested
+    ), (.savingPersonalRecognizer, .quitRequested),
+      (.replacingPersonalRecognizer, .quitRequested):
+      state = .terminated
+      primaryWorkflowState = .idle
+      return [.terminateApplication]
 
     case (.monitoring(.active), .quitRequested),
       (.monitoring(.startingCapture), .quitRequested),
@@ -609,6 +835,113 @@ public final class LaunchCoordinator {
     default:
       return handlePrimaryWorkflow(event)
     }
+  }
+
+  private func handleMonitoringPoseDataset(_ event: AppEvent) -> Effects? {
+    guard case .monitoring = state else { return nil }
+
+    switch (monitoringPoseDatasetState, event) {
+    case (.idle, .poseDatasetImportRequested),
+      (.ready, .poseDatasetImportRequested):
+      switch state {
+      case .monitoring(.active), .monitoring(.paused):
+        break
+      default:
+        return []
+      }
+      validatedTrainingInput = nil
+      monitoringPoseDatasetState = .choosingFolder
+      return [
+        .presentPoseDatasetImport(.choosingFolder),
+        .selectPoseDatasetFolder,
+      ]
+
+    case (
+      .choosingFolder,
+      .poseDatasetFolderSelectionCompleted(.selected(let path))
+    ):
+      monitoringPoseDatasetState = .validating
+      return [
+        .presentPoseDatasetImport(.validating(nil)),
+        .preparePoseDataset(at: path),
+      ]
+
+    case (
+      .choosingFolder,
+      .poseDatasetFolderSelectionCompleted(.cancelled)
+    ):
+      monitoringPoseDatasetState = .idle
+      return [.presentPoseDatasetImport(nil)]
+
+    case (
+      .validating,
+      .poseDatasetPreparationProgressed(let progress)
+    ):
+      return [.presentPoseDatasetImport(.validating(progress))]
+
+    case (
+      .validating,
+      .poseDatasetPreparationCompleted(.succeeded(let input))
+    ):
+      validatedTrainingInput = input
+      monitoringPoseDatasetState = .ready
+      return [.presentPoseDatasetImport(.ready(input))]
+
+    case (
+      .validating,
+      .poseDatasetPreparationCompleted(.failed(let failure))
+    ):
+      monitoringPoseDatasetState = .idle
+      return [.presentPoseDatasetImport(.failed(failure))]
+
+    default:
+      switch event {
+      case .poseDatasetImportRequested,
+        .poseDatasetFolderSelectionCompleted,
+        .poseDatasetPreparationProgressed,
+        .poseDatasetPreparationCompleted:
+        return monitoringPoseDatasetState == .idle ? nil : []
+      default:
+        return nil
+      }
+    }
+  }
+
+  private func restoreAfterRecognizerTraining(
+    _ context: RecognizerTrainingContext,
+    outcome: RecognizerTrainingOutcome
+  ) -> Effects {
+    var effects: Effects
+    switch outcome {
+    case .succeeded:
+      effects = [
+        .clearRecognitionEvidence,
+        .presentRecognizerTraining(.succeeded),
+      ]
+    case .cancelled:
+      effects = [.presentRecognizerTraining(.cancelled)]
+    case .failed(let failure):
+      effects = [.presentRecognizerTraining(.failed(failure))]
+    }
+
+    switch context.priorState {
+    case .activeMonitoring:
+      state = .monitoring(.awaitingAuthorization)
+      effects.append(.presentMenu(.awaitingCameraAuthorization))
+      effects.append(.camera(.requestAuthorization))
+    case .pausedMonitoring:
+      state = .monitoring(.paused)
+      effects.append(.presentMenu(.pausedMonitoring))
+    case .setupRequired:
+      if case .succeeded = outcome {
+        state = .monitoring(.awaitingAuthorization)
+        effects.append(.presentMenu(.awaitingCameraAuthorization))
+        effects.append(.camera(.requestAuthorization))
+      } else {
+        state = .poseDatasetReady(context.input)
+      }
+    }
+    return effects
   }
 
   private func releaseCameraAfterAuthorizationFailure(

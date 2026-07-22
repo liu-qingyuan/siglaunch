@@ -4,6 +4,18 @@ import XCTest
 final class LaunchCoordinatorTests: XCTestCase {
   private typealias Step = (name: String, event: AppEvent, effects: Effects)
 
+  private enum RecognizerTrainingPriorTestState: CaseIterable {
+    case activeMonitoring
+    case pausedMonitoring
+    case setupRequired
+  }
+
+  private enum RecognizerTrainingFailureStage: CaseIterable {
+    case training
+    case candidateSave
+    case modelReplacement
+  }
+
   func testLaunchWithoutPersonalRecognizerPresentsSetupRequired() {
     let coordinator = LaunchCoordinator()
     let steps: [Step] = [
@@ -102,12 +114,11 @@ final class LaunchCoordinatorTests: XCTestCase {
   }
 
   func testCameraAuthorizationAndCaptureFailuresRemainDiagnosableAndRecoverable() {
-    let authorizationFailures: [
-      (status: CameraAuthorizationStatus, reason: CameraUnavailableReason)
-    ] = [
-      (.denied, .authorizationDenied),
-      (.restricted, .authorizationRestricted),
-    ]
+    let authorizationFailures:
+      [(status: CameraAuthorizationStatus, reason: CameraUnavailableReason)] = [
+        (.denied, .authorizationDenied),
+        (.restricted, .authorizationRestricted),
+      ]
 
     for testCase in authorizationFailures {
       let coordinator = makeCoordinatorAwaitingCameraAuthorization()
@@ -174,9 +185,7 @@ final class LaunchCoordinatorTests: XCTestCase {
   }
 
   func testAuthorizationRevocationReleasesActiveCameraBeforeRecovery() {
-    let cases: [
-      (status: CameraAuthorizationStatus, reason: CameraUnavailableReason)
-    ] = [
+    let cases: [(status: CameraAuthorizationStatus, reason: CameraUnavailableReason)] = [
       (.denied, .authorizationDenied),
       (.restricted, .authorizationRestricted),
     ]
@@ -472,6 +481,295 @@ final class LaunchCoordinatorTests: XCTestCase {
     assertEffects(steps, from: coordinator)
   }
 
+  func testFirstRecognizerTrainingSavesAndReplacesBeforeStartingMonitoring() {
+    let coordinator = makeCoordinatorWithReadyPoseDataset()
+    let input = makeTrainingInput()
+    let progress = RecognizerTrainingProgress(
+      completedUnitCount: 4,
+      totalUnitCount: 10
+    )
+    let artifact = RecognizerTrainingArtifact(path: "/tmp/PersonalRecognizer.mlmodel")
+    let candidate = PersonalRecognizerCandidate(identifier: "candidate-1")
+    let steps: [Step] = [
+      (
+        "validated normalized samples start local training",
+        .recognizerTrainingRequested,
+        [
+          .presentRecognizerTraining(.training(nil)),
+          .startRecognizerTraining(input),
+        ]
+      ),
+      (
+        "Create ML progress remains observable",
+        .recognizerTrainingProgressed(progress),
+        [.presentRecognizerTraining(.training(progress))]
+      ),
+      (
+        "a trained artifact is saved as a candidate before activation",
+        .recognizerTrainingCompleted(.succeeded(artifact)),
+        [
+          .presentRecognizerTraining(.saving),
+          .savePersonalRecognizerCandidate(artifact),
+        ]
+      ),
+      (
+        "a reliable candidate is atomically activated",
+        .personalRecognizerCandidateSaveCompleted(.succeeded(candidate)),
+        [
+          .presentRecognizerTraining(.replacing),
+          .replacePersonalRecognizer(candidate),
+        ]
+      ),
+      (
+        "first replacement clears evidence and starts Active Monitoring",
+        .personalRecognizerReplacementCompleted(.succeeded),
+        [
+          .clearRecognitionEvidence,
+          .presentRecognizerTraining(.succeeded),
+          .presentMenu(.awaitingCameraAuthorization),
+          .camera(.requestAuthorization),
+        ]
+      ),
+      (
+        "authorization acquires the built-in camera only after replacement",
+        .camera(.authorizationChanged(.authorized)),
+        [.camera(.startBuiltInCamera)]
+      ),
+      (
+        "capture confirmation enters Active Monitoring",
+        .camera(.captureStartCompleted(.succeeded)),
+        [.presentMenu(.activeMonitoring)]
+      ),
+    ]
+
+    assertEffects(steps, from: coordinator)
+  }
+
+  func testRecognizerTrainingProgressAndCancellationRestoreEveryPriorState() {
+    let progress = RecognizerTrainingProgress(
+      completedUnitCount: 7,
+      totalUnitCount: 10
+    )
+
+    for priorState in RecognizerTrainingPriorTestState.allCases {
+      let coordinator = makeCoordinatorReadyToTrain(from: priorState)
+      let startEffects = coordinator.handle(.recognizerTrainingRequested)
+
+      switch priorState {
+      case .activeMonitoring:
+        XCTAssertEqual(
+          startEffects,
+          [
+            .presentRecognizerTraining(.preparing),
+            .clearRecognitionEvidence,
+            .camera(.stopAndReleaseCamera),
+          ]
+        )
+        XCTAssertEqual(
+          coordinator.handle(.recognizerTrainingProgressed(progress)),
+          [],
+          "progress cannot arrive before camera release"
+        )
+        XCTAssertEqual(
+          coordinator.handle(.camera(.released)),
+          [
+            .presentRecognizerTraining(.training(nil)),
+            .startRecognizerTraining(makeTrainingInput()),
+          ]
+        )
+      case .pausedMonitoring, .setupRequired:
+        XCTAssertEqual(
+          startEffects,
+          [
+            .presentRecognizerTraining(.training(nil)),
+            .startRecognizerTraining(makeTrainingInput()),
+          ]
+        )
+      }
+
+      XCTAssertEqual(
+        coordinator.handle(.recognizerTrainingProgressed(progress)),
+        [.presentRecognizerTraining(.training(progress))],
+        "prior state: \(priorState)"
+      )
+      XCTAssertEqual(
+        coordinator.handle(.recognizerTrainingCancellationRequested),
+        [
+          .presentRecognizerTraining(.cancelling),
+          .cancelRecognizerTraining,
+        ],
+        "prior state: \(priorState)"
+      )
+
+      let restoration = coordinator.handle(
+        .recognizerTrainingCompleted(.cancelled)
+      )
+      switch priorState {
+      case .activeMonitoring:
+        XCTAssertEqual(
+          restoration,
+          [
+            .presentRecognizerTraining(.cancelled),
+            .presentMenu(.awaitingCameraAuthorization),
+            .camera(.requestAuthorization),
+          ]
+        )
+      case .pausedMonitoring:
+        XCTAssertEqual(
+          restoration,
+          [
+            .presentRecognizerTraining(.cancelled),
+            .presentMenu(.pausedMonitoring),
+          ]
+        )
+      case .setupRequired:
+        XCTAssertEqual(
+          restoration,
+          [.presentRecognizerTraining(.cancelled)]
+        )
+      }
+
+      XCTAssertEqual(
+        coordinator.handle(
+          .recognizerTrainingCompleted(
+            .succeeded(RecognizerTrainingArtifact(path: "/tmp/stale.mlmodel"))
+          )
+        ),
+        [],
+        "a stale success cannot save or replace a model"
+      )
+    }
+  }
+
+  func testSuccessfulRecognizerReplacementRestoresActiveAndPausedIntent() {
+    let artifact = RecognizerTrainingArtifact(path: "/tmp/replacement.mlmodel")
+    let candidate = PersonalRecognizerCandidate(identifier: "replacement")
+
+    for priorState in [
+      RecognizerTrainingPriorTestState.activeMonitoring,
+      .pausedMonitoring,
+    ] {
+      let coordinator = makeCoordinatorReadyToTrain(from: priorState)
+      _ = coordinator.handle(.recognizerTrainingRequested)
+      if priorState == .activeMonitoring {
+        _ = coordinator.handle(.camera(.released))
+      }
+      _ = coordinator.handle(
+        .recognizerTrainingCompleted(.succeeded(artifact))
+      )
+      _ = coordinator.handle(
+        .personalRecognizerCandidateSaveCompleted(.succeeded(candidate))
+      )
+
+      let effects = coordinator.handle(
+        .personalRecognizerReplacementCompleted(.succeeded)
+      )
+      switch priorState {
+      case .activeMonitoring:
+        XCTAssertEqual(
+          effects,
+          [
+            .clearRecognitionEvidence,
+            .presentRecognizerTraining(.succeeded),
+            .presentMenu(.awaitingCameraAuthorization),
+            .camera(.requestAuthorization),
+          ]
+        )
+        XCTAssertEqual(
+          coordinator.handle(.camera(.authorizationChanged(.authorized))),
+          [.camera(.startBuiltInCamera)]
+        )
+      case .pausedMonitoring:
+        XCTAssertEqual(
+          effects,
+          [
+            .clearRecognitionEvidence,
+            .presentRecognizerTraining(.succeeded),
+            .presentMenu(.pausedMonitoring),
+          ]
+        )
+        XCTAssertEqual(
+          coordinator.handle(.camera(.authorizationChanged(.authorized))),
+          [],
+          "Paused Monitoring must not reacquire the camera"
+        )
+      case .setupRequired:
+        XCTFail("not part of this replacement table")
+      }
+    }
+  }
+
+  func testEveryRecognizerTrainingFailureStageRestoresEveryPriorState() {
+    let artifact = RecognizerTrainingArtifact(path: "/tmp/replacement.mlmodel")
+    let candidate = PersonalRecognizerCandidate(identifier: "replacement")
+
+    for priorState in RecognizerTrainingPriorTestState.allCases {
+      for stage in RecognizerTrainingFailureStage.allCases {
+        let coordinator = makeCoordinatorReadyToTrain(from: priorState)
+        _ = coordinator.handle(.recognizerTrainingRequested)
+        if priorState == .activeMonitoring {
+          _ = coordinator.handle(.camera(.released))
+        }
+
+        let presentation: RecognizerTrainingPresentation
+        switch stage {
+        case .training:
+          presentation = .failed(.training(.trainingFailed))
+          XCTAssertEqual(
+            coordinator.handle(
+              .recognizerTrainingCompleted(.failed(.trainingFailed))
+            ),
+            expectedRecognizerTrainingRestoration(
+              for: priorState,
+              presentation: presentation
+            )
+          )
+        case .candidateSave:
+          _ = coordinator.handle(
+            .recognizerTrainingCompleted(.succeeded(artifact))
+          )
+          presentation = .failed(.candidateSave(.storageUnavailable))
+          XCTAssertEqual(
+            coordinator.handle(
+              .personalRecognizerCandidateSaveCompleted(
+                .failed(.storageUnavailable)
+              )
+            ),
+            expectedRecognizerTrainingRestoration(
+              for: priorState,
+              presentation: presentation
+            )
+          )
+        case .modelReplacement:
+          _ = coordinator.handle(
+            .recognizerTrainingCompleted(.succeeded(artifact))
+          )
+          _ = coordinator.handle(
+            .personalRecognizerCandidateSaveCompleted(.succeeded(candidate))
+          )
+          presentation = .failed(.modelReplacement(.replacementFailed))
+          XCTAssertEqual(
+            coordinator.handle(
+              .personalRecognizerReplacementCompleted(
+                .failed(.replacementFailed)
+              )
+            ),
+            expectedRecognizerTrainingRestoration(
+              for: priorState,
+              presentation: presentation
+            )
+          )
+        }
+
+        XCTAssertEqual(
+          coordinator.handle(.personalRecognizerReplacementCompleted(.succeeded)),
+          [],
+          "a stale replacement cannot activate after \(stage) failure from \(priorState)"
+        )
+      }
+    }
+  }
+
   func testPoseDatasetFolderCancellationReturnsToSetupRequired() {
     let coordinator = makeSetupRequiredCoordinator()
     XCTAssertEqual(
@@ -540,16 +838,103 @@ final class LaunchCoordinatorTests: XCTestCase {
     }
   }
 
-  func testPoseDatasetImportIsUnavailableWhenPersonalRecognizerExists() {
-    let coordinator = makeWorkflowReadyCoordinator()
+  func testActiveAndPausedMonitoringCanPrepareReplacementTrainingInput() {
+    for priorState in [
+      RecognizerTrainingPriorTestState.activeMonitoring,
+      .pausedMonitoring,
+    ] {
+      let coordinator = makeWorkflowReadyCoordinator()
+      if priorState == .pausedMonitoring {
+        _ = coordinator.handle(.pauseMonitoringRequested)
+        _ = coordinator.handle(.camera(.released))
+      }
+      let input = makeTrainingInput()
+      let selectedPath = "/Users/developer/Replacement Pose Dataset"
 
-    XCTAssertEqual(coordinator.handle(.poseDatasetImportRequested), [])
+      XCTAssertEqual(
+        coordinator.handle(.poseDatasetImportRequested),
+        [
+          .presentPoseDatasetImport(.choosingFolder),
+          .selectPoseDatasetFolder,
+        ],
+        "prior state: \(priorState)"
+      )
+      XCTAssertEqual(
+        coordinator.handle(
+          .poseDatasetFolderSelectionCompleted(.selected(path: selectedPath))
+        ),
+        [
+          .presentPoseDatasetImport(.validating(nil)),
+          .preparePoseDataset(at: selectedPath),
+        ]
+      )
+      XCTAssertEqual(
+        coordinator.handle(.poseDatasetPreparationCompleted(.succeeded(input))),
+        [.presentPoseDatasetImport(.ready(input))]
+      )
+
+      let trainingEffects = coordinator.handle(.recognizerTrainingRequested)
+      switch priorState {
+      case .activeMonitoring:
+        XCTAssertEqual(
+          trainingEffects,
+          [
+            .presentRecognizerTraining(.preparing),
+            .clearRecognitionEvidence,
+            .camera(.stopAndReleaseCamera),
+          ]
+        )
+      case .pausedMonitoring:
+        XCTAssertEqual(
+          trainingEffects,
+          [
+            .presentRecognizerTraining(.training(nil)),
+            .startRecognizerTraining(input),
+          ]
+        )
+      case .setupRequired:
+        XCTFail("not part of this replacement table")
+      }
+    }
+  }
+
+  func testRecognizerTrainingRequiresAValidatedPoseDatasetInput() {
+    let setupRequired = makeSetupRequiredCoordinator()
+    XCTAssertEqual(setupRequired.handle(.recognizerTrainingRequested), [])
+
+    let existingRecognizer = makeWorkflowReadyCoordinator()
+    XCTAssertEqual(existingRecognizer.handle(.recognizerTrainingRequested), [])
     XCTAssertEqual(
-      coordinator.handle(
-        .poseDatasetFolderSelectionCompleted(.selected(path: "/unexpected"))
+      existingRecognizer.handle(
+        .recognizerTrainingProgressed(
+          RecognizerTrainingProgress(completedUnitCount: 1, totalUnitCount: 2)
+        )
       ),
       []
     )
+  }
+
+  func testQuitDuringRecognizerTrainingCancelsWorkAndWaitsForCameraRelease() {
+    let setupRequired = makeCoordinatorWithReadyPoseDataset()
+    _ = setupRequired.handle(.recognizerTrainingRequested)
+    XCTAssertEqual(
+      setupRequired.handle(.quitRequested),
+      [.cancelRecognizerTraining, .terminateApplication]
+    )
+    XCTAssertEqual(setupRequired.handle(.quitRequested), [])
+
+    let active = makeCoordinatorReadyToTrain(from: .activeMonitoring)
+    _ = active.handle(.recognizerTrainingRequested)
+    XCTAssertEqual(
+      active.handle(.quitRequested),
+      [],
+      "termination must wait for the in-flight camera release"
+    )
+    XCTAssertEqual(
+      active.handle(.camera(.released)),
+      [.terminateApplication]
+    )
+    XCTAssertEqual(active.handle(.camera(.released)), [])
   }
 
   func testQuitTerminatesApplicationOnceFromEveryReachableMenuState() {
@@ -1069,6 +1454,65 @@ final class LaunchCoordinatorTests: XCTestCase {
         .menuPresented(.setupRequired),
       ]
     )
+  }
+
+  private func expectedRecognizerTrainingRestoration(
+    for priorState: RecognizerTrainingPriorTestState,
+    presentation: RecognizerTrainingPresentation
+  ) -> Effects {
+    switch priorState {
+    case .activeMonitoring:
+      [
+        .presentRecognizerTraining(presentation),
+        .presentMenu(.awaitingCameraAuthorization),
+        .camera(.requestAuthorization),
+      ]
+    case .pausedMonitoring:
+      [
+        .presentRecognizerTraining(presentation),
+        .presentMenu(.pausedMonitoring),
+      ]
+    case .setupRequired:
+      [.presentRecognizerTraining(presentation)]
+    }
+  }
+
+  private func makeCoordinatorReadyToTrain(
+    from priorState: RecognizerTrainingPriorTestState
+  ) -> LaunchCoordinator {
+    let coordinator = makeCoordinatorWithReadyPoseDataset()
+    guard priorState != .setupRequired else { return coordinator }
+
+    _ = coordinator.handle(.recognizerTrainingRequested)
+    _ = coordinator.handle(
+      .recognizerTrainingCompleted(
+        .succeeded(RecognizerTrainingArtifact(path: "/tmp/initial.mlmodel"))
+      )
+    )
+    _ = coordinator.handle(
+      .personalRecognizerCandidateSaveCompleted(
+        .succeeded(PersonalRecognizerCandidate(identifier: "initial"))
+      )
+    )
+    _ = coordinator.handle(
+      .personalRecognizerReplacementCompleted(.succeeded)
+    )
+    _ = coordinator.handle(.camera(.authorizationChanged(.authorized)))
+    _ = coordinator.handle(.camera(.captureStartCompleted(.succeeded)))
+
+    if priorState == .pausedMonitoring {
+      _ = coordinator.handle(.pauseMonitoringRequested)
+      _ = coordinator.handle(.camera(.released))
+    }
+    return coordinator
+  }
+
+  private func makeCoordinatorWithReadyPoseDataset() -> LaunchCoordinator {
+    let coordinator = makeCoordinatorValidatingPoseDataset()
+    _ = coordinator.handle(
+      .poseDatasetPreparationCompleted(.succeeded(makeTrainingInput()))
+    )
+    return coordinator
   }
 
   private func makeCoordinatorValidatingPoseDataset() -> LaunchCoordinator {

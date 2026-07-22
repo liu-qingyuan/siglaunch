@@ -63,6 +63,21 @@ swift test \
   --filter HerdrAgentAdapterTests/testLiveHerdrFocusesWorkspaceLeadingPiAgentWhenOptedIn
 ```
 
+Recognizer Training consumes only the normalized local samples produced by Pose
+Dataset preparation. Create ML performs a deterministic 80/20 stratified split,
+and the compiled candidate is loaded successfully before it atomically replaces
+`~/Library/Application Support/Siglaunch/PersonalRecognizer.mlmodelc`. Images,
+models, progress, and metrics are never uploaded.
+
+The real Create ML smoke is disabled by default. It generates a temporary local
+Pose Dataset, trains a classifier, compiles and installs the candidate, then
+reloads the active Core ML model:
+
+```bash
+SIGLAUNCH_RUN_CREATE_ML_SMOKE=1 swift test \
+  --filter RecognizerTrainingAdapterTests/testLiveCreateMLArtifactCompilesAndReloadsWhenOptedIn
+```
+
 The live camera smoke is disabled by default. Run it only from a macOS GUI
 session where camera prompts can be answered; it requests authorization, starts
 the MacBook built-in camera, and releases it before completing:

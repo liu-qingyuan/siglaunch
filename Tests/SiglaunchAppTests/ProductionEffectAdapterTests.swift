@@ -254,6 +254,163 @@ final class ProductionEffectAdapterTests: XCTestCase {
     XCTAssertEqual(requestedPaths, [rootPath])
   }
 
+  func testFakeRecognizerAdaptersDriveTrainingThroughCoordinatorLoop() async {
+    let input = makeTrainingInput()
+    let artifact = RecognizerTrainingArtifact(path: "/tmp/trained.mlmodel")
+    let candidate = PersonalRecognizerCandidate(identifier: "candidate")
+    let progress = RecognizerTrainingProgress(
+      completedUnitCount: 6,
+      totalUnitCount: 10
+    )
+    let trainer = FakeRecognizerTrainingAdapter(
+      progress: [progress],
+      result: .succeeded(artifact)
+    )
+    let recognizerStore = FakePersonalRecognizerStore(
+      saveResult: .succeeded(candidate),
+      replacementResult: .succeeded
+    )
+    let cameraAdapter = FakeCameraAdapter()
+    let coordinator = makeSetupRequiredCoordinator()
+    _ = coordinator.handle(.poseDatasetImportRequested)
+    _ = coordinator.handle(
+      .poseDatasetFolderSelectionCompleted(.selected(path: "/Pose Dataset"))
+    )
+    _ = coordinator.handle(.poseDatasetPreparationCompleted(.succeeded(input)))
+    let active = expectation(description: "first recognizer activates monitoring")
+
+    var observedEffects: [AppEffect] = []
+    var trainingPresentations: [RecognizerTrainingPresentation?] = []
+    var sendEvent: ((AppEvent) -> Void)!
+    var effectAdapter: ProductionEffectAdapter!
+    effectAdapter = ProductionEffectAdapter(
+      recognizerStore: recognizerStore,
+      cameraAdapter: cameraAdapter,
+      recognizerTrainer: trainer,
+      eventSink: { event in sendEvent(event) },
+      menuSink: { presentation in
+        if presentation == .activeMonitoring {
+          active.fulfill()
+        }
+      },
+      workflowSink: { _ in },
+      recognizerTrainingSink: { trainingPresentations.append($0) }
+    )
+    sendEvent = { event in
+      let effects = coordinator.handle(event)
+      observedEffects.append(contentsOf: effects)
+      for effect in effects {
+        effectAdapter.execute(effect)
+      }
+    }
+
+    sendEvent(.recognizerTrainingRequested)
+    await fulfillment(of: [active], timeout: 1)
+
+    XCTAssertEqual(
+      observedEffects,
+      [
+        .presentRecognizerTraining(.training(nil)),
+        .startRecognizerTraining(input),
+        .presentRecognizerTraining(.training(progress)),
+        .presentRecognizerTraining(.saving),
+        .savePersonalRecognizerCandidate(artifact),
+        .presentRecognizerTraining(.replacing),
+        .replacePersonalRecognizer(candidate),
+        .clearRecognitionEvidence,
+        .presentRecognizerTraining(.succeeded),
+        .presentMenu(.awaitingCameraAuthorization),
+        .camera(.requestAuthorization),
+        .camera(.startBuiltInCamera),
+        .presentMenu(.activeMonitoring),
+      ]
+    )
+    XCTAssertEqual(trainer.inputs, [input])
+    XCTAssertEqual(recognizerStore.savedArtifacts, [artifact])
+    XCTAssertEqual(recognizerStore.replacedCandidates, [candidate])
+    XCTAssertEqual(
+      trainingPresentations,
+      [.training(nil), .training(progress), .saving, .replacing, .succeeded]
+    )
+  }
+
+  func testTrainingCancellationReturnsAnEventThroughCoordinatorLoop() {
+    let input = makeTrainingInput()
+    let trainer = FakeRecognizerTrainingAdapter(progress: [], result: nil)
+    let recognizerStore = FakePersonalRecognizerStore(
+      saveResult: .failed(.artifactUnavailable),
+      replacementResult: .failed(.candidateUnavailable)
+    )
+    let coordinator = makeSetupRequiredCoordinator()
+    _ = coordinator.handle(.poseDatasetImportRequested)
+    _ = coordinator.handle(
+      .poseDatasetFolderSelectionCompleted(.selected(path: "/Pose Dataset"))
+    )
+    _ = coordinator.handle(.poseDatasetPreparationCompleted(.succeeded(input)))
+
+    var observedEffects: [AppEffect] = []
+    var presentations: [RecognizerTrainingPresentation?] = []
+    var sendEvent: ((AppEvent) -> Void)!
+    var effectAdapter: ProductionEffectAdapter!
+    effectAdapter = ProductionEffectAdapter(
+      recognizerStore: recognizerStore,
+      recognizerTrainer: trainer,
+      eventSink: { event in sendEvent(event) },
+      menuSink: { _ in },
+      workflowSink: { _ in },
+      recognizerTrainingSink: { presentations.append($0) }
+    )
+    sendEvent = { event in
+      let effects = coordinator.handle(event)
+      observedEffects.append(contentsOf: effects)
+      for effect in effects {
+        effectAdapter.execute(effect)
+      }
+    }
+
+    sendEvent(.recognizerTrainingRequested)
+    sendEvent(.recognizerTrainingCancellationRequested)
+
+    XCTAssertEqual(
+      observedEffects,
+      [
+        .presentRecognizerTraining(.training(nil)),
+        .startRecognizerTraining(input),
+        .presentRecognizerTraining(.cancelling),
+        .cancelRecognizerTraining,
+        .presentRecognizerTraining(.cancelled),
+      ]
+    )
+    XCTAssertEqual(presentations, [.training(nil), .cancelling, .cancelled])
+    XCTAssertEqual(trainer.cancellationCount, 1)
+    XCTAssertTrue(recognizerStore.savedArtifacts.isEmpty)
+    XCTAssertTrue(recognizerStore.replacedCandidates.isEmpty)
+  }
+
+  private func makeTrainingInput() -> PoseDatasetTrainingInput {
+    let summary = PoseDatasetLabelSummary(
+      validImageCount: 10,
+      handlessImageCount: 0,
+      unreadableImageCount: 0
+    )
+    let samples = PoseDatasetLabel.allCases.flatMap { label in
+      (0..<10).map { index in
+        PoseDatasetSample(
+          label: label,
+          imagePath: "/prepared/\(label.rawValue)/\(index).png"
+        )
+      }
+    }
+    return PoseDatasetTrainingInput(
+      directoryPath: "/prepared",
+      samples: samples,
+      summary: PoseDatasetSummary(
+        domainExpansion: summary,
+        other: summary
+      )
+    )!
+  }
+
   private func makeWorkflowReadyCoordinator() -> LaunchCoordinator {
     let coordinator = LaunchCoordinator()
     for event in [
@@ -280,6 +437,80 @@ final class ProductionEffectAdapterTests: XCTestCase {
       _ = coordinator.handle(event)
     }
     return coordinator
+  }
+}
+
+@MainActor
+private final class FakeRecognizerTrainingAdapter: RecognizerTrainingAdapting {
+  let progressValues: [RecognizerTrainingProgress]
+  let result: RecognizerTrainingResult?
+  private(set) var inputs: [PoseDatasetTrainingInput] = []
+  private(set) var cancellationCount = 0
+  private var completionSink:
+    (
+      @MainActor @Sendable (RecognizerTrainingResult) -> Void
+    )?
+
+  init(
+    progress: [RecognizerTrainingProgress],
+    result: RecognizerTrainingResult?
+  ) {
+    progressValues = progress
+    self.result = result
+  }
+
+  func start(
+    with input: PoseDatasetTrainingInput,
+    progress: @escaping @MainActor @Sendable (RecognizerTrainingProgress) -> Void,
+    completion: @escaping @MainActor @Sendable (RecognizerTrainingResult) -> Void
+  ) {
+    inputs.append(input)
+    for value in progressValues {
+      progress(value)
+    }
+    if let result {
+      completion(result)
+    } else {
+      completionSink = completion
+    }
+  }
+
+  func cancel() {
+    cancellationCount += 1
+    let completion = completionSink
+    completionSink = nil
+    completion?(.cancelled)
+  }
+}
+
+@MainActor
+private final class FakePersonalRecognizerStore: PersonalRecognizerStoring {
+  let availability: PersonalRecognizerAvailability = .available
+  let saveResult: PersonalRecognizerCandidateSaveResult
+  let replacementResult: PersonalRecognizerReplacementResult
+  private(set) var savedArtifacts: [RecognizerTrainingArtifact] = []
+  private(set) var replacedCandidates: [PersonalRecognizerCandidate] = []
+
+  init(
+    saveResult: PersonalRecognizerCandidateSaveResult,
+    replacementResult: PersonalRecognizerReplacementResult
+  ) {
+    self.saveResult = saveResult
+    self.replacementResult = replacementResult
+  }
+
+  func saveCandidate(
+    from artifact: RecognizerTrainingArtifact
+  ) async -> PersonalRecognizerCandidateSaveResult {
+    savedArtifacts.append(artifact)
+    return saveResult
+  }
+
+  func replaceActiveModel(
+    with candidate: PersonalRecognizerCandidate
+  ) async -> PersonalRecognizerReplacementResult {
+    replacedCandidates.append(candidate)
+    return replacementResult
   }
 }
 
