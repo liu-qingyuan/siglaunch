@@ -36,6 +36,14 @@ final class AppRuntime: ObservableObject {
     }
   }
 
+  func pauseMonitoring() {
+    send(.pauseMonitoringRequested)
+  }
+
+  func resumeMonitoring() {
+    send(.resumeMonitoringRequested)
+  }
+
   func importPoseDataset() {
     send(.poseDatasetImportRequested)
   }

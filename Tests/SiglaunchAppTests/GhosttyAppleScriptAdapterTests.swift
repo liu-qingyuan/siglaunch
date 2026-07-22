@@ -147,7 +147,9 @@ final class GhosttyAppleScriptAdapterTests: XCTestCase {
       AppEvent.appLaunched,
       .menuBarApplicationConfigurationCompleted(.succeeded),
       .personalRecognizerChecked(.available),
-      .menuPresented(.personalRecognizerReady),
+      .camera(.authorizationChanged(.authorized)),
+      .camera(.captureStartCompleted(.succeeded)),
+      .menuPresented(.activeMonitoring),
       .primaryWorkflowRequested,
       .workflowConfigurationLoadCompleted(
         .loaded(

@@ -85,6 +85,79 @@ final class ProductionEffectAdapterTests: XCTestCase {
     XCTAssertEqual(workflowPresentations, [nil, .leadingPiAgentFocused])
   }
 
+  func testFakeCameraAdapterDrivesMonitoringLifecycleThroughCoordinatorLoop() {
+    let cameraAdapter = FakeCameraAdapter()
+    let coordinator = LaunchCoordinator()
+    for event in [
+      AppEvent.appLaunched,
+      .menuBarApplicationConfigurationCompleted(.succeeded),
+    ] {
+      _ = coordinator.handle(event)
+    }
+
+    var observedEffects: [AppEffect] = []
+    var menuPresentations: [MenuPresentation] = []
+    var sendEvent: ((AppEvent) -> Void)!
+    var effectAdapter: ProductionEffectAdapter!
+    effectAdapter = ProductionEffectAdapter(
+      recognizerStore: PersonalRecognizerStore(),
+      cameraAdapter: cameraAdapter,
+      eventSink: { event in sendEvent(event) },
+      menuSink: { menuPresentations.append($0) },
+      workflowSink: { _ in }
+    )
+    sendEvent = { event in
+      let effects = coordinator.handle(event)
+      observedEffects.append(contentsOf: effects)
+      for effect in effects {
+        effectAdapter.execute(effect)
+      }
+    }
+
+    sendEvent(.personalRecognizerChecked(.available))
+    sendEvent(.pauseMonitoringRequested)
+    sendEvent(.resumeMonitoringRequested)
+
+    XCTAssertEqual(
+      cameraAdapter.executedEffects,
+      [
+        .requestAuthorization,
+        .startBuiltInCamera,
+        .stopAndReleaseCamera,
+        .requestAuthorization,
+        .startBuiltInCamera,
+      ]
+    )
+    XCTAssertEqual(
+      menuPresentations,
+      [
+        .awaitingCameraAuthorization,
+        .activeMonitoring,
+        .pausedMonitoring,
+        .awaitingCameraAuthorization,
+        .activeMonitoring,
+      ]
+    )
+    XCTAssertFalse(
+      observedEffects.contains { effect in
+        switch effect {
+        case .loadWorkflowConfiguration,
+          .resolveGhostty,
+          .launchGhostty,
+          .ensureDefaultHerdrSession,
+          .queryHerdrAgents,
+          .focusHerdrAgent,
+          .primaryWorkflowNoMatchingAgent,
+          .primaryWorkflowLeadingPiAgentFocused,
+          .primaryWorkflowFailed:
+          true
+        default:
+          false
+        }
+      }
+    )
+  }
+
   func testFakePoseDatasetAdaptersDriveImportThroughCoordinatorLoop() async {
     let rootPath = "/Users/developer/Pose Dataset"
     let progress = PoseDatasetPreparationProgress(
@@ -187,7 +260,9 @@ final class ProductionEffectAdapterTests: XCTestCase {
       AppEvent.appLaunched,
       .menuBarApplicationConfigurationCompleted(.succeeded),
       .personalRecognizerChecked(.available),
-      .menuPresented(.personalRecognizerReady),
+      .camera(.authorizationChanged(.authorized)),
+      .camera(.captureStartCompleted(.succeeded)),
+      .menuPresented(.activeMonitoring),
     ] {
       _ = coordinator.handle(event)
     }
@@ -205,6 +280,28 @@ final class ProductionEffectAdapterTests: XCTestCase {
       _ = coordinator.handle(event)
     }
     return coordinator
+  }
+}
+
+@MainActor
+private final class FakeCameraAdapter: CameraAdapting {
+  private(set) var executedEffects: [CameraEffect] = []
+
+  func execute(
+    _ effect: CameraEffect,
+    eventSink: @escaping @MainActor @Sendable (CameraEvent) -> Void
+  ) {
+    executedEffects.append(effect)
+    switch effect {
+    case .requestAuthorization:
+      eventSink(.authorizationChanged(.authorized))
+    case .startBuiltInCamera, .rebuildBuiltInCamera:
+      eventSink(.captureStartCompleted(.succeeded))
+    case .stopCapture:
+      break
+    case .stopAndReleaseCamera:
+      eventSink(.released)
+    }
   }
 }
 

@@ -5,6 +5,8 @@ struct SiglaunchMenu: View {
   let presentation: MenuPresentation?
   let primaryWorkflowPresentation: PrimaryWorkflowPresentation?
   let poseDatasetImportPresentation: PoseDatasetImportPresentation?
+  let onPauseMonitoring: () -> Void
+  let onResumeMonitoring: () -> Void
   let onImportPoseDataset: () -> Void
   let onQuit: () -> Void
 
@@ -35,6 +37,20 @@ struct SiglaunchMenu: View {
     }
 
     Divider()
+
+    switch presentation {
+    case .activeMonitoring, .awaitingCameraAuthorization, .captureInterrupted,
+      .cameraUnavailable:
+      Button(action: onPauseMonitoring) {
+        Label("Pause Monitoring", systemImage: "pause.fill")
+      }
+    case .pausedMonitoring:
+      Button(action: onResumeMonitoring) {
+        Label("Resume Monitoring", systemImage: "play.fill")
+      }
+    default:
+      EmptyView()
+    }
 
     if presentation == .setupRequired {
       Button(action: onImportPoseDataset) {
@@ -203,14 +219,55 @@ extension PoseDatasetLabelSummary {
   }
 }
 
+extension CameraUnavailableReason {
+  fileprivate var detail: String {
+    switch self {
+    case .authorizationDenied:
+      "Camera permission was denied."
+    case .authorizationRestricted:
+      "Camera access is restricted."
+    case .capture(.builtInCameraUnavailable):
+      "The MacBook built-in camera is unavailable."
+    case .capture(.configurationFailed):
+      "The camera could not be configured."
+    case .capture(.startFailed):
+      "Camera capture could not start."
+    }
+  }
+}
+
 extension MenuPresentation {
   var content: MenuStatusContent {
     switch self {
-    case .personalRecognizerReady:
+    case .awaitingCameraAuthorization:
       MenuStatusContent(
-        title: "Personal Recognizer Ready",
-        symbolName: "checkmark.circle",
-        detail: nil
+        title: "Camera Authorization",
+        symbolName: "video.badge.ellipsis",
+        detail: "Waiting for camera permission."
+      )
+    case .activeMonitoring:
+      MenuStatusContent(
+        title: "Active Monitoring",
+        symbolName: "viewfinder.circle",
+        detail: "MacBook built-in camera is active."
+      )
+    case .pausedMonitoring:
+      MenuStatusContent(
+        title: "Paused Monitoring",
+        symbolName: "pause.circle",
+        detail: "Camera is released."
+      )
+    case .captureInterrupted:
+      MenuStatusContent(
+        title: "Camera Interrupted",
+        symbolName: "video.slash",
+        detail: "Monitoring will resume when the camera is available."
+      )
+    case .cameraUnavailable(let reason):
+      MenuStatusContent(
+        title: "Camera Unavailable",
+        symbolName: "video.slash",
+        detail: reason.detail
       )
     case .setupRequired:
       MenuStatusContent(

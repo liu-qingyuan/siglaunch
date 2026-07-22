@@ -62,3 +62,12 @@ SIGLAUNCH_HERDR_FOCUS_WORKSPACE="$PWD" \
 swift test \
   --filter HerdrAgentAdapterTests/testLiveHerdrFocusesWorkspaceLeadingPiAgentWhenOptedIn
 ```
+
+The live camera smoke is disabled by default. Run it only from a macOS GUI
+session where camera prompts can be answered; it requests authorization, starts
+the MacBook built-in camera, and releases it before completing:
+
+```bash
+SIGLAUNCH_RUN_CAMERA_SMOKE=1 swift test \
+  --filter CameraAdapterTests/testLiveBuiltInCameraAuthorizationCaptureAndReleaseWhenOptedIn
+```

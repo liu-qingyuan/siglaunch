@@ -10,6 +10,49 @@ public enum MenuBarApplicationConfigurationResult: Equatable, Sendable {
   case failed
 }
 
+public enum CameraAuthorizationStatus: Equatable, Sendable {
+  case notDetermined
+  case authorized
+  case denied
+  case restricted
+}
+
+public enum CameraCaptureFailure: Equatable, Sendable {
+  case builtInCameraUnavailable
+  case configurationFailed
+  case startFailed
+}
+
+public enum CameraCaptureStartResult: Equatable, Sendable {
+  case succeeded
+  case failed(CameraCaptureFailure)
+}
+
+public enum CameraUnavailableReason: Equatable, Sendable {
+  case authorizationDenied
+  case authorizationRestricted
+  case capture(CameraCaptureFailure)
+}
+
+public enum CameraEvent: Equatable, Sendable {
+  case authorizationChanged(CameraAuthorizationStatus)
+  case captureStartCompleted(CameraCaptureStartResult)
+  case released
+  case captureInterrupted
+  case captureInterruptionEnded
+  case systemWillSleep
+  case systemDidWake
+  case cameraSwitchDetected
+}
+
+public enum CameraEffect: Equatable, Sendable {
+  case requestAuthorization
+  case startBuiltInCamera
+  case stopCapture
+  case stopAndReleaseCamera
+  case rebuildBuiltInCamera
+}
+
 public struct WorkflowConfiguration: Equatable, Sendable {
   public let workspacePath: String
   public let piCommand: [String]
@@ -141,7 +184,10 @@ public enum AppEvent: Equatable, Sendable {
   case appLaunched
   case menuBarApplicationConfigurationCompleted(MenuBarApplicationConfigurationResult)
   case personalRecognizerChecked(PersonalRecognizerAvailability)
+  case camera(CameraEvent)
   case menuPresented(MenuPresentation)
+  case pauseMonitoringRequested
+  case resumeMonitoringRequested
   case primaryWorkflowRequested
   case workflowConfigurationLoadCompleted(WorkflowConfigurationLoadResult)
   case ghosttyResolutionCompleted(GhosttyResolutionResult)
@@ -157,14 +203,20 @@ public enum AppEvent: Equatable, Sendable {
 }
 
 public enum MenuPresentation: Equatable, Sendable {
-  case personalRecognizerReady
+  case awaitingCameraAuthorization
+  case activeMonitoring
+  case pausedMonitoring
+  case captureInterrupted
+  case cameraUnavailable(CameraUnavailableReason)
   case setupRequired
 }
 
 public enum AppEffect: Equatable, Sendable {
   case configureMenuBarApplication
   case checkPersonalRecognizer
+  case camera(CameraEffect)
   case presentMenu(MenuPresentation)
+  case clearRecognitionEvidence
   case loadWorkflowConfiguration
   case resolveGhostty
   case launchGhostty(at: String)
@@ -183,11 +235,37 @@ public enum AppEffect: Equatable, Sendable {
 public typealias Effects = [AppEffect]
 
 public final class LaunchCoordinator {
+  private enum WakeAction {
+    case startCapture
+    case requestAuthorization
+    case remainPaused
+    case presentPaused
+  }
+
+  private enum CameraReleaseDestination {
+    case paused
+    case sleeping(WakeAction, wakeReceived: Bool)
+    case unavailable(CameraUnavailableReason)
+    case terminated
+  }
+
+  private enum MonitoringState {
+    case awaitingAuthorization
+    case startingCapture
+    case active
+    case interrupted
+    case rebuildingCapture
+    case releasing(CameraReleaseDestination)
+    case sleeping(WakeAction)
+    case paused
+    case unavailable(CameraUnavailableReason)
+  }
+
   private enum State {
     case awaitingLaunch
     case configuringMenuBarApplication
     case checkingPersonalRecognizer
-    case personalRecognizerAvailable
+    case monitoring(MonitoringState)
     case setupRequired
     case choosingPoseDatasetFolder
     case validatingPoseDataset
@@ -224,8 +302,217 @@ public final class LaunchCoordinator {
       return [.checkPersonalRecognizer]
 
     case (.checkingPersonalRecognizer, .personalRecognizerChecked(.available)):
-      state = .personalRecognizerAvailable
-      return [.presentMenu(.personalRecognizerReady)]
+      state = .monitoring(.awaitingAuthorization)
+      return [
+        .presentMenu(.awaitingCameraAuthorization),
+        .camera(.requestAuthorization),
+      ]
+
+    case (
+      .monitoring(.awaitingAuthorization),
+      .camera(.authorizationChanged(.authorized))
+    ), (
+      .monitoring(.unavailable),
+      .camera(.authorizationChanged(.authorized))
+    ):
+      state = .monitoring(.startingCapture)
+      return [.camera(.startBuiltInCamera)]
+
+    case (
+      .monitoring(.awaitingAuthorization),
+      .camera(.authorizationChanged(.notDetermined))
+    ):
+      return []
+
+    case (.monitoring(.active), .camera(.authorizationChanged(.denied))),
+      (.monitoring(.startingCapture), .camera(.authorizationChanged(.denied))),
+      (.monitoring(.interrupted), .camera(.authorizationChanged(.denied))),
+      (.monitoring(.rebuildingCapture), .camera(.authorizationChanged(.denied))):
+      return releaseCameraAfterAuthorizationFailure(.authorizationDenied)
+
+    case (.monitoring(.active), .camera(.authorizationChanged(.restricted))),
+      (.monitoring(.startingCapture), .camera(.authorizationChanged(.restricted))),
+      (.monitoring(.interrupted), .camera(.authorizationChanged(.restricted))),
+      (.monitoring(.rebuildingCapture), .camera(.authorizationChanged(.restricted))):
+      return releaseCameraAfterAuthorizationFailure(.authorizationRestricted)
+
+    case (
+      .monitoring(.awaitingAuthorization),
+      .camera(.authorizationChanged(.denied))
+    ):
+      let reason = CameraUnavailableReason.authorizationDenied
+      state = .monitoring(.unavailable(reason))
+      return [.presentMenu(.cameraUnavailable(reason))]
+
+    case (
+      .monitoring(.awaitingAuthorization),
+      .camera(.authorizationChanged(.restricted))
+    ):
+      let reason = CameraUnavailableReason.authorizationRestricted
+      state = .monitoring(.unavailable(reason))
+      return [.presentMenu(.cameraUnavailable(reason))]
+
+    case (
+      .monitoring(.startingCapture),
+      .camera(.captureStartCompleted(.succeeded))
+    ), (
+      .monitoring(.rebuildingCapture),
+      .camera(.captureStartCompleted(.succeeded))
+    ):
+      state = .monitoring(.active)
+      return [.presentMenu(.activeMonitoring)]
+
+    case (
+      .monitoring(.startingCapture),
+      .camera(.captureStartCompleted(.failed(let failure)))
+    ), (
+      .monitoring(.rebuildingCapture),
+      .camera(.captureStartCompleted(.failed(let failure)))
+    ):
+      let reason = CameraUnavailableReason.capture(failure)
+      state = .monitoring(.unavailable(reason))
+      return [.presentMenu(.cameraUnavailable(reason))]
+
+    case (.monitoring(.active), .camera(.captureInterrupted)),
+      (.monitoring(.startingCapture), .camera(.captureInterrupted)),
+      (.monitoring(.rebuildingCapture), .camera(.captureInterrupted)):
+      state = .monitoring(.interrupted)
+      return [
+        .clearRecognitionEvidence,
+        .camera(.stopCapture),
+        .presentMenu(.captureInterrupted),
+      ]
+
+    case (
+      .monitoring(.interrupted),
+      .camera(.captureInterruptionEnded)
+    ):
+      state = .monitoring(.startingCapture)
+      return [.camera(.startBuiltInCamera)]
+
+    case (.monitoring(.active), .camera(.cameraSwitchDetected)),
+      (.monitoring(.startingCapture), .camera(.cameraSwitchDetected)),
+      (.monitoring(.interrupted), .camera(.cameraSwitchDetected)):
+      state = .monitoring(.rebuildingCapture)
+      return [
+        .clearRecognitionEvidence,
+        .camera(.rebuildBuiltInCamera),
+        .presentMenu(.captureInterrupted),
+      ]
+
+    case (.monitoring(.paused), .camera(.cameraSwitchDetected)),
+      (.monitoring(.awaitingAuthorization), .camera(.cameraSwitchDetected)),
+      (.monitoring(.unavailable), .camera(.cameraSwitchDetected)):
+      return [.clearRecognitionEvidence]
+
+    case (.monitoring(.active), .camera(.systemWillSleep)),
+      (.monitoring(.startingCapture), .camera(.systemWillSleep)),
+      (.monitoring(.interrupted), .camera(.systemWillSleep)),
+      (.monitoring(.rebuildingCapture), .camera(.systemWillSleep)):
+      state = .monitoring(
+        .releasing(.sleeping(.startCapture, wakeReceived: false))
+      )
+      return [
+        .clearRecognitionEvidence,
+        .camera(.stopAndReleaseCamera),
+        .presentMenu(.captureInterrupted),
+      ]
+
+    case (.monitoring(.paused), .camera(.systemWillSleep)):
+      state = .monitoring(.sleeping(.remainPaused))
+      return [.clearRecognitionEvidence]
+
+    case (.monitoring(.awaitingAuthorization), .camera(.systemWillSleep)),
+      (.monitoring(.unavailable), .camera(.systemWillSleep)):
+      state = .monitoring(.sleeping(.requestAuthorization))
+      return [.clearRecognitionEvidence]
+
+    case (
+      .monitoring(.releasing(.sleeping(let action, wakeReceived: false))),
+      .camera(.systemDidWake)
+    ):
+      state = .monitoring(
+        .releasing(.sleeping(action, wakeReceived: true))
+      )
+      return []
+
+    case (
+      .monitoring(.releasing(.sleeping(let action, wakeReceived: false))),
+      .camera(.released)
+    ):
+      state = .monitoring(.sleeping(action))
+      return []
+
+    case (
+      .monitoring(.releasing(.sleeping(let action, wakeReceived: true))),
+      .camera(.released)
+    ), (
+      .monitoring(.sleeping(let action)),
+      .camera(.systemDidWake)
+    ):
+      return resumeAfterSleep(action)
+
+    case (
+      .monitoring(.releasing(.sleeping(_, wakeReceived: let wakeReceived))),
+      .pauseMonitoringRequested
+    ):
+      state = .monitoring(
+        .releasing(.sleeping(.presentPaused, wakeReceived: wakeReceived))
+      )
+      return []
+
+    case (.monitoring(.sleeping), .pauseMonitoringRequested):
+      state = .monitoring(.sleeping(.presentPaused))
+      return []
+
+    case (.monitoring(.awaitingAuthorization), .pauseMonitoringRequested),
+      (.monitoring(.unavailable), .pauseMonitoringRequested):
+      state = .monitoring(.paused)
+      return [
+        .clearRecognitionEvidence,
+        .presentMenu(.pausedMonitoring),
+      ]
+
+    case (.monitoring(.active), .pauseMonitoringRequested),
+      (.monitoring(.startingCapture), .pauseMonitoringRequested),
+      (.monitoring(.rebuildingCapture), .pauseMonitoringRequested):
+      state = .monitoring(.releasing(.paused))
+      return [
+        .clearRecognitionEvidence,
+        .camera(.stopAndReleaseCamera),
+      ]
+
+    case (.monitoring(.interrupted), .pauseMonitoringRequested):
+      state = .monitoring(.releasing(.paused))
+      return [.camera(.stopAndReleaseCamera)]
+
+    case (
+      .monitoring(.releasing(.paused)),
+      .camera(.released)
+    ):
+      state = .monitoring(.paused)
+      return [.presentMenu(.pausedMonitoring)]
+
+    case (
+      .monitoring(.releasing(.unavailable(let reason))),
+      .camera(.released)
+    ):
+      state = .monitoring(.unavailable(reason))
+      return []
+
+    case (
+      .monitoring(.releasing(.unavailable)),
+      .pauseMonitoringRequested
+    ):
+      state = .monitoring(.releasing(.paused))
+      return []
+
+    case (.monitoring(.paused), .resumeMonitoringRequested):
+      state = .monitoring(.awaitingAuthorization)
+      return [
+        .presentMenu(.awaitingCameraAuthorization),
+        .camera(.requestAuthorization),
+      ]
 
     case (.checkingPersonalRecognizer, .personalRecognizerChecked(.missing)):
       state = .setupRequired
@@ -276,10 +563,41 @@ public final class LaunchCoordinator {
       state = .setupRequired
       return [.presentPoseDatasetImport(.failed(failure))]
 
+    case (.monitoring(.active), .quitRequested),
+      (.monitoring(.startingCapture), .quitRequested),
+      (.monitoring(.interrupted), .quitRequested),
+      (.monitoring(.rebuildingCapture), .quitRequested):
+      state = .monitoring(.releasing(.terminated))
+      primaryWorkflowState = .idle
+      return [
+        .clearRecognitionEvidence,
+        .camera(.stopAndReleaseCamera),
+      ]
+
+    case (.monitoring(.releasing(.paused)), .quitRequested),
+      (.monitoring(.releasing(.sleeping)), .quitRequested),
+      (.monitoring(.releasing(.unavailable)), .quitRequested):
+      state = .monitoring(.releasing(.terminated))
+      primaryWorkflowState = .idle
+      return []
+
+    case (
+      .monitoring(.releasing(.terminated)),
+      .camera(.released)
+    ):
+      state = .terminated
+      return [.terminateApplication]
+
+    case (.monitoring(.releasing(.terminated)), .quitRequested):
+      return []
+
     case (.awaitingLaunch, .quitRequested),
       (.configuringMenuBarApplication, .quitRequested),
       (.checkingPersonalRecognizer, .quitRequested),
-      (.personalRecognizerAvailable, .quitRequested),
+      (.monitoring(.awaitingAuthorization), .quitRequested),
+      (.monitoring(.sleeping), .quitRequested),
+      (.monitoring(.paused), .quitRequested),
+      (.monitoring(.unavailable), .quitRequested),
       (.setupRequired, .quitRequested),
       (.choosingPoseDatasetFolder, .quitRequested),
       (.validatingPoseDataset, .quitRequested),
@@ -293,10 +611,41 @@ public final class LaunchCoordinator {
     }
   }
 
+  private func releaseCameraAfterAuthorizationFailure(
+    _ reason: CameraUnavailableReason
+  ) -> Effects {
+    state = .monitoring(.releasing(.unavailable(reason)))
+    return [
+      .clearRecognitionEvidence,
+      .camera(.stopAndReleaseCamera),
+      .presentMenu(.cameraUnavailable(reason)),
+    ]
+  }
+
+  private func resumeAfterSleep(_ action: WakeAction) -> Effects {
+    switch action {
+    case .startCapture:
+      state = .monitoring(.startingCapture)
+      return [.camera(.startBuiltInCamera)]
+    case .requestAuthorization:
+      state = .monitoring(.awaitingAuthorization)
+      return [
+        .presentMenu(.awaitingCameraAuthorization),
+        .camera(.requestAuthorization),
+      ]
+    case .remainPaused:
+      state = .monitoring(.paused)
+      return []
+    case .presentPaused:
+      state = .monitoring(.paused)
+      return [.presentMenu(.pausedMonitoring)]
+    }
+  }
+
   private func handlePrimaryWorkflow(_ event: AppEvent) -> Effects {
     switch (primaryWorkflowState, event) {
     case (.idle, .primaryWorkflowRequested):
-      guard case .personalRecognizerAvailable = state else { return [] }
+      guard case .monitoring(.active) = state else { return [] }
       primaryWorkflowState = .loadingConfiguration
       return [.loadWorkflowConfiguration]
 

@@ -60,7 +60,7 @@ final class LaunchCoordinatorTests: XCTestCase {
     }
   }
 
-  func testAvailablePersonalRecognizerPresentsReadyWithoutClaimingMonitoring() {
+  func testAvailablePersonalRecognizerAuthorizesAndStartsActiveMonitoring() {
     let coordinator = makeCoordinator(
       after: [
         .appLaunched,
@@ -69,23 +69,346 @@ final class LaunchCoordinatorTests: XCTestCase {
     )
     let steps: [Step] = [
       (
-        "availability presents a truthful pre-monitoring status",
+        "availability requests camera authorization without claiming capture",
         .personalRecognizerChecked(.available),
-        [.presentMenu(.personalRecognizerReady)]
+        [
+          .presentMenu(.awaitingCameraAuthorization),
+          .camera(.requestAuthorization),
+        ]
+      ),
+      (
+        "authorization starts only the built-in camera",
+        .camera(.authorizationChanged(.authorized)),
+        [.camera(.startBuiltInCamera)]
+      ),
+      (
+        "capture confirmation enters Active Monitoring",
+        .camera(.captureStartCompleted(.succeeded)),
+        [.presentMenu(.activeMonitoring)]
       ),
       (
         "menu presentation completion has no further effects",
-        .menuPresented(.personalRecognizerReady),
+        .menuPresented(.activeMonitoring),
         []
       ),
       (
-        "a stale missing result cannot replace availability",
+        "a stale missing result cannot replace Active Monitoring",
         .personalRecognizerChecked(.missing),
         []
       ),
     ]
 
     assertEffects(steps, from: coordinator)
+  }
+
+  func testCameraAuthorizationAndCaptureFailuresRemainDiagnosableAndRecoverable() {
+    let authorizationFailures: [
+      (status: CameraAuthorizationStatus, reason: CameraUnavailableReason)
+    ] = [
+      (.denied, .authorizationDenied),
+      (.restricted, .authorizationRestricted),
+    ]
+
+    for testCase in authorizationFailures {
+      let coordinator = makeCoordinatorAwaitingCameraAuthorization()
+      XCTAssertEqual(
+        coordinator.handle(.camera(.authorizationChanged(testCase.status))),
+        [.presentMenu(.cameraUnavailable(testCase.reason))],
+        "authorization status: \(testCase.status)"
+      )
+      XCTAssertEqual(
+        coordinator.handle(.camera(.captureStartCompleted(.succeeded))),
+        [],
+        "unavailable authorization must not accept capture: \(testCase.status)"
+      )
+      XCTAssertEqual(
+        coordinator.handle(.camera(.authorizationChanged(.authorized))),
+        [.camera(.startBuiltInCamera)],
+        "a later authorization event should recover: \(testCase.status)"
+      )
+    }
+
+    let pending = makeCoordinatorAwaitingCameraAuthorization()
+    XCTAssertEqual(
+      pending.handle(.camera(.authorizationChanged(.notDetermined))),
+      []
+    )
+    XCTAssertEqual(
+      pending.handle(.camera(.authorizationChanged(.authorized))),
+      [.camera(.startBuiltInCamera)]
+    )
+
+    let pausedWhileAwaitingAuthorization = makeCoordinatorAwaitingCameraAuthorization()
+    XCTAssertEqual(
+      pausedWhileAwaitingAuthorization.handle(.pauseMonitoringRequested),
+      [
+        .clearRecognitionEvidence,
+        .presentMenu(.pausedMonitoring),
+      ]
+    )
+    XCTAssertEqual(
+      pausedWhileAwaitingAuthorization.handle(
+        .camera(.authorizationChanged(.authorized))
+      ),
+      [],
+      "a late authorization event must not override Paused Monitoring"
+    )
+
+    for failure in [
+      CameraCaptureFailure.builtInCameraUnavailable,
+      .configurationFailed,
+      .startFailed,
+    ] {
+      let coordinator = makeCoordinatorStartingCamera()
+      XCTAssertEqual(
+        coordinator.handle(.camera(.captureStartCompleted(.failed(failure)))),
+        [.presentMenu(.cameraUnavailable(.capture(failure)))],
+        "capture failure: \(failure)"
+      )
+      XCTAssertEqual(
+        coordinator.handle(.camera(.authorizationChanged(.authorized))),
+        [.camera(.startBuiltInCamera)],
+        "an authorization refresh should retry capture: \(failure)"
+      )
+    }
+  }
+
+  func testAuthorizationRevocationReleasesActiveCameraBeforeRecovery() {
+    let cases: [
+      (status: CameraAuthorizationStatus, reason: CameraUnavailableReason)
+    ] = [
+      (.denied, .authorizationDenied),
+      (.restricted, .authorizationRestricted),
+    ]
+
+    for testCase in cases {
+      let coordinator = makeActiveMonitoringCoordinator()
+      XCTAssertEqual(
+        coordinator.handle(.camera(.authorizationChanged(testCase.status))),
+        [
+          .clearRecognitionEvidence,
+          .camera(.stopAndReleaseCamera),
+          .presentMenu(.cameraUnavailable(testCase.reason)),
+        ]
+      )
+      XCTAssertEqual(
+        coordinator.handle(.camera(.authorizationChanged(.authorized))),
+        [],
+        "recovery must wait for release: \(testCase.status)"
+      )
+      XCTAssertEqual(coordinator.handle(.camera(.released)), [])
+      XCTAssertEqual(
+        coordinator.handle(.camera(.authorizationChanged(.authorized))),
+        [.camera(.startBuiltInCamera)]
+      )
+    }
+  }
+
+  func testPauseResumeAndQuitKeepCameraOwnershipAlignedWithMonitoring() {
+    let coordinator = makeActiveMonitoringCoordinator()
+    let steps: [Step] = [
+      (
+        "pause clears evidence and releases camera ownership",
+        .pauseMonitoringRequested,
+        [
+          .clearRecognitionEvidence,
+          .camera(.stopAndReleaseCamera),
+        ]
+      ),
+      (
+        "pause waits for release instead of claiming Paused Monitoring early",
+        .pauseMonitoringRequested,
+        []
+      ),
+      (
+        "release confirmation enters Paused Monitoring",
+        .camera(.released),
+        [.presentMenu(.pausedMonitoring)]
+      ),
+      (
+        "resume rechecks authorization before reacquiring the camera",
+        .resumeMonitoringRequested,
+        [
+          .presentMenu(.awaitingCameraAuthorization),
+          .camera(.requestAuthorization),
+        ]
+      ),
+      (
+        "authorized resume reacquires only the built-in camera",
+        .camera(.authorizationChanged(.authorized)),
+        [.camera(.startBuiltInCamera)]
+      ),
+      (
+        "capture confirmation restores Active Monitoring",
+        .camera(.captureStartCompleted(.succeeded)),
+        [.presentMenu(.activeMonitoring)]
+      ),
+      (
+        "quit clears evidence and releases before terminating",
+        .quitRequested,
+        [
+          .clearRecognitionEvidence,
+          .camera(.stopAndReleaseCamera),
+        ]
+      ),
+      (
+        "quit cannot terminate before release confirmation",
+        .quitRequested,
+        []
+      ),
+      (
+        "release confirmation terminates exactly once",
+        .camera(.released),
+        [.terminateApplication]
+      ),
+      (
+        "stale release confirmation has no effect",
+        .camera(.released),
+        []
+      ),
+    ]
+
+    assertEffects(steps, from: coordinator)
+
+    let paused = makeActiveMonitoringCoordinator()
+    _ = paused.handle(.pauseMonitoringRequested)
+    _ = paused.handle(.camera(.released))
+    XCTAssertEqual(paused.handle(.quitRequested), [.terminateApplication])
+  }
+
+  func testCaptureInterruptionClearsEvidenceAndHonorsCurrentMonitoringIntent() {
+    let active = makeActiveMonitoringCoordinator()
+    let activeSteps: [Step] = [
+      (
+        "interruption stops frame delivery and clears recognition evidence",
+        .camera(.captureInterrupted),
+        [
+          .clearRecognitionEvidence,
+          .camera(.stopCapture),
+          .presentMenu(.captureInterrupted),
+        ]
+      ),
+      (
+        "interruption end resumes while the user still wants Active Monitoring",
+        .camera(.captureInterruptionEnded),
+        [.camera(.startBuiltInCamera)]
+      ),
+      (
+        "resumed capture restores Active Monitoring",
+        .camera(.captureStartCompleted(.succeeded)),
+        [.presentMenu(.activeMonitoring)]
+      ),
+    ]
+    assertEffects(activeSteps, from: active)
+
+    let pausedDuringInterruption = makeActiveMonitoringCoordinator()
+    XCTAssertEqual(
+      pausedDuringInterruption.handle(.camera(.captureInterrupted)),
+      [
+        .clearRecognitionEvidence,
+        .camera(.stopCapture),
+        .presentMenu(.captureInterrupted),
+      ]
+    )
+    XCTAssertEqual(
+      pausedDuringInterruption.handle(.pauseMonitoringRequested),
+      [.camera(.stopAndReleaseCamera)]
+    )
+    XCTAssertEqual(
+      pausedDuringInterruption.handle(.camera(.captureInterruptionEnded)),
+      [],
+      "interruption end must not override a later Pause request"
+    )
+    XCTAssertEqual(
+      pausedDuringInterruption.handle(.camera(.released)),
+      [.presentMenu(.pausedMonitoring)]
+    )
+  }
+
+  func testSleepWakeReleasesCameraAndRestoresOnlyActiveMonitoringIntent() {
+    let wakeBeforeRelease = makeActiveMonitoringCoordinator()
+    let activeSteps: [Step] = [
+      (
+        "sleep clears evidence and begins camera release",
+        .camera(.systemWillSleep),
+        [
+          .clearRecognitionEvidence,
+          .camera(.stopAndReleaseCamera),
+          .presentMenu(.captureInterrupted),
+        ]
+      ),
+      (
+        "wake cannot reacquire before the old camera is released",
+        .camera(.systemDidWake),
+        []
+      ),
+      (
+        "release after wake reacquires for the prior Active intent",
+        .camera(.released),
+        [.camera(.startBuiltInCamera)]
+      ),
+      (
+        "reacquired capture restores Active Monitoring",
+        .camera(.captureStartCompleted(.succeeded)),
+        [.presentMenu(.activeMonitoring)]
+      ),
+    ]
+    assertEffects(activeSteps, from: wakeBeforeRelease)
+
+    let wakeAfterRelease = makeActiveMonitoringCoordinator()
+    _ = wakeAfterRelease.handle(.camera(.systemWillSleep))
+    XCTAssertEqual(wakeAfterRelease.handle(.camera(.released)), [])
+    XCTAssertEqual(
+      wakeAfterRelease.handle(.camera(.systemDidWake)),
+      [.camera(.startBuiltInCamera)]
+    )
+
+    let paused = makeActiveMonitoringCoordinator()
+    _ = paused.handle(.pauseMonitoringRequested)
+    _ = paused.handle(.camera(.released))
+    XCTAssertEqual(
+      paused.handle(.camera(.systemWillSleep)),
+      [.clearRecognitionEvidence]
+    )
+    XCTAssertEqual(
+      paused.handle(.camera(.systemDidWake)),
+      [],
+      "a pre-sleep Paused intent must remain released"
+    )
+
+    let pausedWhileSleeping = makeActiveMonitoringCoordinator()
+    _ = pausedWhileSleeping.handle(.camera(.systemWillSleep))
+    XCTAssertEqual(pausedWhileSleeping.handle(.pauseMonitoringRequested), [])
+    _ = pausedWhileSleeping.handle(.camera(.released))
+    XCTAssertEqual(
+      pausedWhileSleeping.handle(.camera(.systemDidWake)),
+      [.presentMenu(.pausedMonitoring)]
+    )
+  }
+
+  func testCameraSwitchRebuildsOnlyActiveBuiltInCaptureWithoutWorkflowEffects() {
+    let active = makeActiveMonitoringCoordinator()
+    XCTAssertEqual(
+      active.handle(.camera(.cameraSwitchDetected)),
+      [
+        .clearRecognitionEvidence,
+        .camera(.rebuildBuiltInCamera),
+        .presentMenu(.captureInterrupted),
+      ]
+    )
+    XCTAssertEqual(
+      active.handle(.camera(.captureStartCompleted(.succeeded))),
+      [.presentMenu(.activeMonitoring)]
+    )
+
+    let paused = makeActiveMonitoringCoordinator()
+    _ = paused.handle(.pauseMonitoringRequested)
+    _ = paused.handle(.camera(.released))
+    XCTAssertEqual(
+      paused.handle(.camera(.cameraSwitchDetected)),
+      [.clearRecognitionEvidence],
+      "a camera switch must not reacquire capture while Paused Monitoring"
+    )
   }
 
   func testSetupRequiredPoseDatasetImportReachesDatasetReadyThroughPublicEffects() {
@@ -240,12 +563,12 @@ final class LaunchCoordinatorTests: XCTestCase {
         ]
       ),
       (
-        "Personal Recognizer ready",
+        "awaiting camera authorization",
         [
           .appLaunched,
           .menuBarApplicationConfigurationCompleted(.succeeded),
           .personalRecognizerChecked(.available),
-          .menuPresented(.personalRecognizerReady),
+          .menuPresented(.awaitingCameraAuthorization),
         ]
       ),
       (
@@ -699,15 +1022,42 @@ final class LaunchCoordinatorTests: XCTestCase {
     return coordinator
   }
 
-  private func makeWorkflowReadyCoordinator() -> LaunchCoordinator {
+  private func makeCoordinatorAwaitingCameraAuthorization() -> LaunchCoordinator {
     makeCoordinator(
       after: [
         .appLaunched,
         .menuBarApplicationConfigurationCompleted(.succeeded),
         .personalRecognizerChecked(.available),
-        .menuPresented(.personalRecognizerReady),
       ]
     )
+  }
+
+  private func makeCoordinatorStartingCamera() -> LaunchCoordinator {
+    makeCoordinator(
+      after: [
+        .appLaunched,
+        .menuBarApplicationConfigurationCompleted(.succeeded),
+        .personalRecognizerChecked(.available),
+        .camera(.authorizationChanged(.authorized)),
+      ]
+    )
+  }
+
+  private func makeActiveMonitoringCoordinator() -> LaunchCoordinator {
+    makeCoordinator(
+      after: [
+        .appLaunched,
+        .menuBarApplicationConfigurationCompleted(.succeeded),
+        .personalRecognizerChecked(.available),
+        .camera(.authorizationChanged(.authorized)),
+        .camera(.captureStartCompleted(.succeeded)),
+        .menuPresented(.activeMonitoring),
+      ]
+    )
+  }
+
+  private func makeWorkflowReadyCoordinator() -> LaunchCoordinator {
+    makeActiveMonitoringCoordinator()
   }
 
   private func makeSetupRequiredCoordinator() -> LaunchCoordinator {

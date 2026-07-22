@@ -10,6 +10,7 @@ enum PrimaryWorkflowPresentation: Equatable {
 @MainActor
 final class ProductionEffectAdapter {
   private let recognizerStore: PersonalRecognizerStore
+  private let cameraAdapter: any CameraAdapting
   private let workflowConfigurationStore: any WorkflowConfigurationLoading
   private let ghosttyPlatformAdapter: any GhosttyPlatformAdapting
   private let herdrAgentAdapter: any HerdrAgentAdapting
@@ -22,6 +23,7 @@ final class ProductionEffectAdapter {
 
   init(
     recognizerStore: PersonalRecognizerStore,
+    cameraAdapter: any CameraAdapting = ProductionCameraAdapter(),
     workflowConfigurationStore: any WorkflowConfigurationLoading = WorkflowConfigurationStore(),
     ghosttyPlatformAdapter: any GhosttyPlatformAdapting = GhosttyPlatformAdapter(),
     herdrAgentAdapter: any HerdrAgentAdapting = HerdrAgentAdapter(),
@@ -33,6 +35,7 @@ final class ProductionEffectAdapter {
     poseDatasetSink: @escaping (PoseDatasetImportPresentation?) -> Void = { _ in }
   ) {
     self.recognizerStore = recognizerStore
+    self.cameraAdapter = cameraAdapter
     self.workflowConfigurationStore = workflowConfigurationStore
     self.ghosttyPlatformAdapter = ghosttyPlatformAdapter
     self.herdrAgentAdapter = herdrAgentAdapter
@@ -52,9 +55,15 @@ final class ProductionEffectAdapter {
       eventSink(.menuBarApplicationConfigurationCompleted(result))
     case .checkPersonalRecognizer:
       eventSink(.personalRecognizerChecked(recognizerStore.availability))
+    case .camera(let cameraEffect):
+      cameraAdapter.execute(cameraEffect) { [weak self] event in
+        self?.eventSink(.camera(event))
+      }
     case .presentMenu(let presentation):
       menuSink(presentation)
       eventSink(.menuPresented(presentation))
+    case .clearRecognitionEvidence:
+      break
     case .loadWorkflowConfiguration:
       workflowSink(nil)
       eventSink(

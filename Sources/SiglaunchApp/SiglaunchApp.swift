@@ -12,6 +12,8 @@ struct SiglaunchApplication: App {
         presentation: runtime.menuPresentation,
         primaryWorkflowPresentation: runtime.primaryWorkflowPresentation,
         poseDatasetImportPresentation: runtime.poseDatasetImportPresentation,
+        onPauseMonitoring: runtime.pauseMonitoring,
+        onResumeMonitoring: runtime.resumeMonitoring,
         onImportPoseDataset: runtime.importPoseDataset,
         onQuit: { runtime.send(.quitRequested) }
       )
