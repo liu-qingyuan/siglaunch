@@ -8,14 +8,56 @@ protocol RecognitionAdapting: AnyObject {
   func receive(_ frame: CapturedRecognitionFrame)
   func execute(
     _ effect: RecognitionEffect,
-    eventSink: @escaping @MainActor @Sendable (RecognitionFrameCompletion) -> Void
+    analysisSink: @escaping @MainActor @Sendable (RecognitionAnalysis) -> Void
   )
   func reset()
 }
 
-struct VisionRecognitionResult: Equatable, Sendable {
+struct RecognitionAnalysis: @unchecked Sendable {
+  let completion: RecognitionFrameCompletion
+  let cameraImage: CGImage?
+  let normalizedCrop: CGImage?
+
+  init(
+    frame: RecognitionFrameReference,
+    cameraImage: CGImage?,
+    normalizedCrop: CGImage?,
+    diagnosticGesture: DiagnosticGestureResult,
+    personalRecognizerResult: PersonalRecognizerInferenceResult
+  ) {
+    completion = RecognitionFrameCompletion(
+      frame: frame,
+      diagnosticGesture: diagnosticGesture,
+      personalRecognizerResult: personalRecognizerResult
+    )
+    self.cameraImage = cameraImage
+    self.normalizedCrop = normalizedCrop
+  }
+
+  var frame: RecognitionFrameReference { completion.frame }
+  var diagnosticGesture: DiagnosticGestureResult { completion.diagnosticGesture }
+  var personalRecognizerResult: PersonalRecognizerInferenceResult {
+    completion.personalRecognizerResult
+  }
+}
+
+struct VisionRecognitionResult: @unchecked Sendable {
+  let cameraImage: CGImage?
+  let normalizedCrop: CGImage?
   let diagnosticGesture: DiagnosticGestureResult
   let personalRecognizerResult: PersonalRecognizerInferenceResult
+
+  init(
+    cameraImage: CGImage? = nil,
+    normalizedCrop: CGImage? = nil,
+    diagnosticGesture: DiagnosticGestureResult,
+    personalRecognizerResult: PersonalRecognizerInferenceResult
+  ) {
+    self.cameraImage = cameraImage
+    self.normalizedCrop = normalizedCrop
+    self.diagnosticGesture = diagnosticGesture
+    self.personalRecognizerResult = personalRecognizerResult
+  }
 }
 
 protocol VisionDiagnosticAnalysis: AnyObject, Sendable {
@@ -84,7 +126,7 @@ final class VisionDiagnosticAdapter: RecognitionAdapting {
 
   func execute(
     _ effect: RecognitionEffect,
-    eventSink: @escaping @MainActor @Sendable (RecognitionFrameCompletion) -> Void
+    analysisSink: @escaping @MainActor @Sendable (RecognitionAnalysis) -> Void
   ) {
     switch effect {
     case .discardFrame(let reference):
@@ -99,9 +141,11 @@ final class VisionDiagnosticAdapter: RecognitionAdapting {
       analysisTask = Task { [weak self] in
         let result = await executor.perform(analysis)
         guard !Task.isCancelled else { return }
-        eventSink(
-          RecognitionFrameCompletion(
+        analysisSink(
+          RecognitionAnalysis(
             frame: reference,
+            cameraImage: result.cameraImage,
+            normalizedCrop: result.normalizedCrop,
             diagnosticGesture: result.diagnosticGesture,
             personalRecognizerResult: result.personalRecognizerResult
           )

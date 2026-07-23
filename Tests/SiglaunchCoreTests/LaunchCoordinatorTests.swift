@@ -116,7 +116,6 @@ final class LaunchCoordinatorTests: XCTestCase {
         "availability requests camera authorization without claiming capture",
         .personalRecognizerChecked(.available),
         [
-          .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
           .presentMenu(.awaitingCameraAuthorization),
           .camera(.requestAuthorization),
         ]
@@ -187,7 +186,6 @@ final class LaunchCoordinatorTests: XCTestCase {
       pausedWhileAwaitingAuthorization.handle(.pauseMonitoringRequested),
       [
         .clearRecognitionEvidence,
-        .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
         .presentMenu(.pausedMonitoring),
       ]
     )
@@ -209,7 +207,6 @@ final class LaunchCoordinatorTests: XCTestCase {
         coordinator.handle(captureStartCompleted(.failed(failure))),
         [
           .clearRecognitionEvidence,
-          .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
           .presentMenu(.cameraUnavailable(.capture(failure))),
         ],
         "capture failure: \(failure)"
@@ -234,7 +231,6 @@ final class LaunchCoordinatorTests: XCTestCase {
         coordinator.handle(.camera(.authorizationChanged(testCase.status))),
         [
           .clearRecognitionEvidence,
-          .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
           .camera(.stopAndReleaseCamera),
           .presentMenu(.cameraUnavailable(testCase.reason)),
         ]
@@ -260,7 +256,6 @@ final class LaunchCoordinatorTests: XCTestCase {
         .pauseMonitoringRequested,
         [
           .clearRecognitionEvidence,
-          .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
           .camera(.stopAndReleaseCamera),
         ]
       ),
@@ -279,7 +274,6 @@ final class LaunchCoordinatorTests: XCTestCase {
         .resumeMonitoringRequested,
         [
           .clearRecognitionEvidence,
-          .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
           .presentMenu(.awaitingCameraAuthorization),
           .camera(.requestAuthorization),
         ]
@@ -299,7 +293,6 @@ final class LaunchCoordinatorTests: XCTestCase {
         .quitRequested,
         [
           .clearRecognitionEvidence,
-          .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
           .camera(.stopAndReleaseCamera),
         ]
       ),
@@ -336,7 +329,6 @@ final class LaunchCoordinatorTests: XCTestCase {
         captureInterrupted(),
         [
           .clearRecognitionEvidence,
-          .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
           .camera(.stopCapture),
           .presentMenu(.captureInterrupted),
         ]
@@ -359,7 +351,6 @@ final class LaunchCoordinatorTests: XCTestCase {
       pausedDuringInterruption.handle(captureInterrupted()),
       [
         .clearRecognitionEvidence,
-        .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
         .camera(.stopCapture),
         .presentMenu(.captureInterrupted),
       ]
@@ -387,7 +378,6 @@ final class LaunchCoordinatorTests: XCTestCase {
         .camera(.systemWillSleep),
         [
           .clearRecognitionEvidence,
-          .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
           .camera(.stopAndReleaseCamera),
           .presentMenu(.captureInterrupted),
         ]
@@ -424,8 +414,7 @@ final class LaunchCoordinatorTests: XCTestCase {
     XCTAssertEqual(
       paused.handle(.camera(.systemWillSleep)),
       [
-        .clearRecognitionEvidence,
-        .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
+        .clearRecognitionEvidence
       ]
     )
     XCTAssertEqual(
@@ -450,7 +439,6 @@ final class LaunchCoordinatorTests: XCTestCase {
       active.handle(.camera(.cameraSwitchDetected)),
       [
         .clearRecognitionEvidence,
-        .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
         rebuildBuiltInCameraEffect(),
         .presentMenu(.captureInterrupted),
       ]
@@ -466,8 +454,7 @@ final class LaunchCoordinatorTests: XCTestCase {
     XCTAssertEqual(
       paused.handle(.camera(.cameraSwitchDetected)),
       [
-        .clearRecognitionEvidence,
-        .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
+        .clearRecognitionEvidence
       ],
       "a camera switch must not reacquire capture while Paused Monitoring"
     )
@@ -578,7 +565,6 @@ final class LaunchCoordinatorTests: XCTestCase {
         .personalRecognizerReplacementCompleted(.succeeded),
         [
           .clearRecognitionEvidence,
-          .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
           .presentRecognizerTraining(.succeeded),
           .presentMenu(.awaitingCameraAuthorization),
           .camera(.requestAuthorization),
@@ -616,7 +602,6 @@ final class LaunchCoordinatorTests: XCTestCase {
           [
             .presentRecognizerTraining(.preparing),
             .clearRecognitionEvidence,
-            .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
             .camera(.stopAndReleaseCamera),
           ]
         )
@@ -725,7 +710,6 @@ final class LaunchCoordinatorTests: XCTestCase {
           effects,
           [
             .clearRecognitionEvidence,
-            .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
             .presentRecognizerTraining(.succeeded),
             .presentMenu(.awaitingCameraAuthorization),
             .camera(.requestAuthorization),
@@ -740,7 +724,6 @@ final class LaunchCoordinatorTests: XCTestCase {
           effects,
           [
             .clearRecognitionEvidence,
-            .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
             .presentRecognizerTraining(.succeeded),
             .presentMenu(.pausedMonitoring),
           ]
@@ -938,7 +921,6 @@ final class LaunchCoordinatorTests: XCTestCase {
           [
             .presentRecognizerTraining(.preparing),
             .clearRecognitionEvidence,
-            .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
             .camera(.stopAndReleaseCamera),
           ]
         )

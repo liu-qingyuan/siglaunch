@@ -215,7 +215,6 @@ final class DomainExpansionTriggerTests: XCTestCase {
       coordinator.handle(.resumeMonitoringRequested),
       [
         .clearRecognitionEvidence,
-        .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
         .presentMenu(.awaitingCameraAuthorization),
         .camera(.requestAuthorization),
       ]

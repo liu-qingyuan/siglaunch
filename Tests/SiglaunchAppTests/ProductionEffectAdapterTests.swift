@@ -1,3 +1,4 @@
+import CoreGraphics
 import CoreVideo
 import SiglaunchCore
 import XCTest
@@ -242,15 +243,26 @@ final class ProductionEffectAdapterTests: XCTestCase {
     )
   }
 
-  func testCameraFramesDriveRecognitionDiagnosticsThroughCoordinatorLoop() throws {
+  func testCameraFramesPublishOnlyAcceptedSameFrameDiagnostics() throws {
     let cameraAdapter = FakeCameraAdapter()
     let diagnostic = DiagnosticGestureResult(
       handDetection: .detected,
       recognizedJointCount: 21,
-      extendedFingerCount: 5,
-      isOpenPalm: true
+      extendedFingerCount: 2,
+      isOpenPalm: false
     )
-    let recognitionAdapter = FakeRecognitionAdapter(diagnostic: diagnostic)
+    let cameraImage = try makeImage(width: 64, height: 48)
+    let normalizedCrop = try makeImage(width: 224, height: 224)
+    let top = PersonalRecognizerClassification(
+      label: "domain_expansion",
+      confidence: 0.9
+    )
+    let recognitionAdapter = FakeRecognitionAdapter(
+      diagnostic: diagnostic,
+      classifications: [top],
+      cameraImage: cameraImage,
+      normalizedCrop: normalizedCrop
+    )
     let coordinator = LaunchCoordinator()
     for event in [
       AppEvent.appLaunched,
@@ -261,7 +273,9 @@ final class ProductionEffectAdapterTests: XCTestCase {
 
     var observedEffects: [AppEffect] = []
     var adapterEvents: [AppEvent] = []
-    var diagnostics: [RecognitionDiagnostics] = []
+    var sessions: [RecognitionDiagnosticsSession?] = []
+    var snapshots: [RecognitionDiagnosticsSnapshot] = []
+    var menuPresentationCount = 0
     var workflowPresentations: [PrimaryWorkflowPresentation?] = []
     var sendEvent: ((AppEvent) -> Void)!
     var effectAdapter: ProductionEffectAdapter!
@@ -274,9 +288,18 @@ final class ProductionEffectAdapterTests: XCTestCase {
         adapterEvents.append(event)
         sendEvent(event)
       },
-      menuSink: { _ in },
+      menuSink: { _ in menuPresentationCount += 1 },
       workflowSink: { workflowPresentations.append($0) },
-      recognitionDiagnosticsSink: { diagnostics.append($0) }
+      recognitionDiagnosticsSink: { update in
+        switch update {
+        case .opened(let session):
+          sessions.append(session)
+        case .snapshot(let snapshot):
+          snapshots.append(snapshot)
+        case .closed:
+          sessions.append(nil)
+        }
+      }
     )
     sendEvent = { event in
       let effects = coordinator.handle(event)
@@ -287,6 +310,8 @@ final class ProductionEffectAdapterTests: XCTestCase {
     }
 
     sendEvent(.personalRecognizerChecked(.available))
+    sendEvent(.recognitionDiagnosticsRequested)
+    menuPresentationCount = 0
     let frame = try makeCapturedFrame(sequenceNumber: 1)
     cameraAdapter.emit(frame)
 
@@ -295,7 +320,24 @@ final class ProductionEffectAdapterTests: XCTestCase {
       recognitionAdapter.executedEffects,
       [.analyzeFrame(frame.reference)]
     )
-    XCTAssertEqual(diagnostics.last?.diagnosticGesture, diagnostic)
+    XCTAssertEqual(sessions.compactMap { $0 }.count, 1)
+    XCTAssertEqual(snapshots.count, 1)
+    XCTAssertEqual(snapshots.first?.diagnostics.frame, frame.reference)
+    XCTAssertEqual(snapshots.first?.diagnostics.topClassification, top)
+    XCTAssertTrue(snapshots.first?.cameraImage === cameraImage)
+    XCTAssertTrue(snapshots.first?.normalizedCrop === normalizedCrop)
+
+    for sequenceNumber in 2...25 {
+      cameraAdapter.emit(
+        try makeCapturedFrame(sequenceNumber: UInt64(sequenceNumber))
+      )
+    }
+    XCTAssertEqual(snapshots.count, 25)
+    XCTAssertEqual(
+      snapshots.last?.diagnostics.frame.sequenceNumber,
+      25
+    )
+    XCTAssertEqual(menuPresentationCount, 0)
     let clockEventIndex = adapterEvents.firstIndex(of: .recognitionClockRead(123.5))
     let completionEventIndex = adapterEvents.firstIndex {
       guard case .recognitionFrameCompleted = $0 else { return false }
@@ -310,6 +352,67 @@ final class ProductionEffectAdapterTests: XCTestCase {
       observedEffects.contains(.recognition(.analyzeFrame(frame.reference)))
     )
     XCTAssertTrue(workflowPresentations.isEmpty)
+  }
+
+  func testRejectedCompletionCannotPublishOrRetainAnAnalysisPayload() {
+    let diagnostic = DiagnosticGestureResult(
+      handDetection: .detected,
+      recognizedJointCount: 21,
+      extendedFingerCount: 2,
+      isOpenPalm: false
+    )
+    let recognitionAdapter = FakeRecognitionAdapter(
+      diagnostic: diagnostic,
+      classifications: [
+        PersonalRecognizerClassification(
+          label: "domain_expansion",
+          confidence: 0.9
+        )
+      ]
+    )
+    let coordinator = makeWorkflowReadyCoordinator()
+    var snapshots: [RecognitionDiagnosticsSnapshot] = []
+    var effectAdapter: ProductionEffectAdapter!
+    effectAdapter = ProductionEffectAdapter(
+      recognizerStore: PersonalRecognizerStore(),
+      recognitionAdapter: recognitionAdapter,
+      eventSink: { event in
+        for effect in coordinator.handle(event) {
+          effectAdapter.execute(effect)
+        }
+      },
+      menuSink: { _ in },
+      workflowSink: { _ in },
+      recognitionDiagnosticsSink: { update in
+        guard case .snapshot(let snapshot) = update else { return }
+        snapshots.append(snapshot)
+      }
+    )
+    let rejectedFrame = RecognitionFrameReference(
+      lifecycleID: RecognitionLifecycleID(rawValue: 1),
+      sequenceNumber: 99
+    )
+
+    effectAdapter.execute(.recognition(.analyzeFrame(rejectedFrame)))
+    effectAdapter.execute(
+      .presentRecognitionDiagnosticsFrame(
+        RecognitionDiagnosticsFrame(
+          frame: rejectedFrame,
+          policy: .standard,
+          topClassification: PersonalRecognizerClassification(
+            label: "domain_expansion",
+            confidence: 0.9
+          ),
+          isPoseMatch: true,
+          poseMatchCount: 1,
+          targetFrameRate: .fps15,
+          captureFramesPerSecond: nil,
+          completedRecognitionFramesPerSecond: 0
+        )
+      )
+    )
+
+    XCTAssertTrue(snapshots.isEmpty)
   }
 
   func testPoseTriggerRunsPrimaryWorkflowOnceThroughProductionAdapters() throws {
@@ -604,7 +707,6 @@ final class ProductionEffectAdapterTests: XCTestCase {
         .presentRecognizerTraining(.replacing),
         .replacePersonalRecognizer(candidate),
         .clearRecognitionEvidence,
-        .presentRecognitionDiagnostics(.initial(targetFrameRate: .fps15)),
         .presentRecognizerTraining(.succeeded),
         .presentMenu(.awaitingCameraAuthorization),
         .camera(.requestAuthorization),
@@ -677,6 +779,24 @@ final class ProductionEffectAdapterTests: XCTestCase {
     XCTAssertEqual(trainer.cancellationCount, 1)
     XCTAssertTrue(recognizerStore.savedArtifacts.isEmpty)
     XCTAssertTrue(recognizerStore.replacedCandidates.isEmpty)
+  }
+
+  private func makeImage(width: Int, height: Int) throws -> CGImage {
+    guard
+      let context = CGContext(
+        data: nil,
+        width: width,
+        height: height,
+        bitsPerComponent: 8,
+        bytesPerRow: width * 4,
+        space: CGColorSpaceCreateDeviceRGB(),
+        bitmapInfo: CGImageAlphaInfo.premultipliedLast.rawValue
+      ),
+      let image = context.makeImage()
+    else {
+      throw ProductionEffectAdapterTestError.imageCreationFailed
+    }
+    return image
   }
 
   private func makeCapturedFrame(
@@ -789,6 +909,7 @@ private struct FixedRecognitionClock: RecognitionClockReading {
 
 @MainActor
 private enum ProductionEffectAdapterTestError: Error {
+  case imageCreationFailed
   case pixelBufferCreationFailed(CVReturn)
 }
 
@@ -796,15 +917,21 @@ private enum ProductionEffectAdapterTestError: Error {
 private final class FakeRecognitionAdapter: RecognitionAdapting {
   let diagnostic: DiagnosticGestureResult
   let classifications: [PersonalRecognizerClassification]?
+  let cameraImage: CGImage?
+  let normalizedCrop: CGImage?
   private(set) var receivedFrames: [CapturedRecognitionFrame] = []
   private(set) var executedEffects: [RecognitionEffect] = []
 
   init(
     diagnostic: DiagnosticGestureResult,
-    classifications: [PersonalRecognizerClassification]? = nil
+    classifications: [PersonalRecognizerClassification]? = nil,
+    cameraImage: CGImage? = nil,
+    normalizedCrop: CGImage? = nil
   ) {
     self.diagnostic = diagnostic
     self.classifications = classifications
+    self.cameraImage = cameraImage
+    self.normalizedCrop = normalizedCrop
   }
 
   func receive(_ frame: CapturedRecognitionFrame) {
@@ -813,13 +940,15 @@ private final class FakeRecognitionAdapter: RecognitionAdapting {
 
   func execute(
     _ effect: RecognitionEffect,
-    eventSink: @escaping @MainActor @Sendable (RecognitionFrameCompletion) -> Void
+    analysisSink: @escaping @MainActor @Sendable (RecognitionAnalysis) -> Void
   ) {
     executedEffects.append(effect)
     guard case .analyzeFrame(let reference) = effect else { return }
-    eventSink(
-      RecognitionFrameCompletion(
+    analysisSink(
+      RecognitionAnalysis(
         frame: reference,
+        cameraImage: cameraImage,
+        normalizedCrop: normalizedCrop,
         diagnosticGesture: diagnostic,
         personalRecognizerResult: classifications.map {
           .classified($0)

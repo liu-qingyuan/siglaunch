@@ -34,10 +34,11 @@ final class ProductionEffectAdapter {
   private let eventSink: (AppEvent) -> Void
   private let menuSink: (MenuPresentation) -> Void
   private let workflowSink: (PrimaryWorkflowPresentation?) -> Void
-  private let recognitionDiagnosticsSink: (RecognitionDiagnostics) -> Void
+  private let recognitionDiagnosticsSink: (RecognitionDiagnosticsUpdate) -> Void
   private let domainExpansionCandidateProgressSink: (DomainExpansionCandidateProgress?) -> Void
   private let poseDatasetSink: (PoseDatasetImportPresentation?) -> Void
   private let recognizerTrainingSink: (RecognizerTrainingPresentation?) -> Void
+  private var pendingRecognitionAnalyses: [RecognitionFrameReference: RecognitionAnalysis] = [:]
 
   init(
     recognizerStore: any PersonalRecognizerStoring,
@@ -55,7 +56,9 @@ final class ProductionEffectAdapter {
     eventSink: @escaping (AppEvent) -> Void,
     menuSink: @escaping (MenuPresentation) -> Void,
     workflowSink: @escaping (PrimaryWorkflowPresentation?) -> Void,
-    recognitionDiagnosticsSink: @escaping (RecognitionDiagnostics) -> Void = { _ in },
+    recognitionDiagnosticsSink: @escaping (RecognitionDiagnosticsUpdate) -> Void = {
+      _ in
+    },
     domainExpansionCandidateProgressSink: @escaping (DomainExpansionCandidateProgress?) -> Void = {
       _ in
     },
@@ -103,17 +106,37 @@ final class ProductionEffectAdapter {
         }
       )
     case .recognition(let recognitionEffect):
-      recognitionAdapter.execute(recognitionEffect) { [weak self] completion in
+      recognitionAdapter.execute(recognitionEffect) { [weak self] analysis in
         guard let self else { return }
+        pendingRecognitionAnalyses[analysis.frame] = analysis
+        defer { pendingRecognitionAnalyses.removeValue(forKey: analysis.frame) }
         eventSink(.recognitionClockRead(recognitionClock.now()))
-        eventSink(.recognitionFrameCompleted(completion))
+        eventSink(.recognitionFrameCompleted(analysis.completion))
       }
     case .presentMenu(let presentation):
       menuSink(presentation)
       eventSink(.menuPresented(presentation))
-    case .presentRecognitionDiagnostics(let diagnostics):
-      recognitionDiagnosticsSink(diagnostics)
+    case .openRecognitionDiagnostics(let session):
+      recognitionDiagnosticsSink(.opened(session))
+    case .closeRecognitionDiagnostics:
+      pendingRecognitionAnalyses.removeAll()
+      recognitionDiagnosticsSink(.closed)
+    case .presentRecognitionDiagnosticsFrame(let diagnostics):
+      guard
+        let analysis = pendingRecognitionAnalyses.removeValue(
+          forKey: diagnostics.frame
+        )
+      else { return }
+      recognitionDiagnosticsSink(
+        .snapshot(
+          RecognitionDiagnosticsSnapshot(
+            diagnostics: diagnostics,
+            analysis: analysis
+          )
+        )
+      )
     case .clearRecognitionEvidence:
+      pendingRecognitionAnalyses.removeAll()
       recognitionAdapter.reset()
     case .presentDomainExpansionCandidateProgress(let progress):
       domainExpansionCandidateProgressSink(progress)

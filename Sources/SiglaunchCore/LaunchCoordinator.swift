@@ -117,6 +117,112 @@ public enum PersonalRecognizerInferenceResult: Equatable, Sendable {
   case failed
 }
 
+public struct DomainExpansionRecognitionPolicy: Equatable, Sendable {
+  public let targetLabel: String
+  public let minimumConfidence: Double
+  public let evidenceWindowSize: Int
+  public let requiredPoseMatchCount: Int
+
+  public init(
+    targetLabel: String,
+    minimumConfidence: Double,
+    evidenceWindowSize: Int,
+    requiredPoseMatchCount: Int
+  ) {
+    precondition(!targetLabel.isEmpty)
+    precondition((0...1).contains(minimumConfidence))
+    precondition(evidenceWindowSize > 0)
+    precondition((1...evidenceWindowSize).contains(requiredPoseMatchCount))
+    self.targetLabel = targetLabel
+    self.minimumConfidence = minimumConfidence
+    self.evidenceWindowSize = evidenceWindowSize
+    self.requiredPoseMatchCount = requiredPoseMatchCount
+  }
+
+  public static let standard = DomainExpansionRecognitionPolicy(
+    targetLabel: "domain_expansion",
+    minimumConfidence: 0.75,
+    evidenceWindowSize: 5,
+    requiredPoseMatchCount: 3
+  )
+
+  public func topClassification(
+    in classifications: [PersonalRecognizerClassification]
+  ) -> PersonalRecognizerClassification? {
+    classifications.reduce(nil) { currentTop, candidate in
+      guard
+        candidate.confidence.isFinite,
+        (0...1).contains(candidate.confidence)
+      else {
+        return currentTop
+      }
+      guard let currentTop else { return candidate }
+      return candidate.confidence > currentTop.confidence
+        ? candidate
+        : currentTop
+    }
+  }
+
+  public func isPoseMatch(
+    _ classification: PersonalRecognizerClassification
+  ) -> Bool {
+    classification.label == targetLabel
+      && classification.confidence >= minimumConfidence
+  }
+}
+
+public struct RecognitionDiagnosticsSession: Equatable, Sendable {
+  public let policy: DomainExpansionRecognitionPolicy
+  public let targetFrameRate: RecognitionFrameRate
+  public let captureFramesPerSecond: Double?
+
+  public init(
+    policy: DomainExpansionRecognitionPolicy,
+    targetFrameRate: RecognitionFrameRate,
+    captureFramesPerSecond: Double?
+  ) {
+    self.policy = policy
+    self.targetFrameRate = targetFrameRate
+    self.captureFramesPerSecond = captureFramesPerSecond
+  }
+}
+
+public struct RecognitionDiagnosticsFrame: Equatable, Sendable {
+  public let frame: RecognitionFrameReference
+  public let policy: DomainExpansionRecognitionPolicy
+  public let topClassification: PersonalRecognizerClassification?
+  public let isPoseMatch: Bool?
+  public let poseMatchCount: Int
+  public let targetFrameRate: RecognitionFrameRate
+  public let captureFramesPerSecond: Double?
+  public let completedRecognitionFramesPerSecond: Double
+
+  public init(
+    frame: RecognitionFrameReference,
+    policy: DomainExpansionRecognitionPolicy,
+    topClassification: PersonalRecognizerClassification?,
+    isPoseMatch: Bool?,
+    poseMatchCount: Int,
+    targetFrameRate: RecognitionFrameRate,
+    captureFramesPerSecond: Double?,
+    completedRecognitionFramesPerSecond: Double
+  ) {
+    precondition((0...policy.evidenceWindowSize).contains(poseMatchCount))
+    self.frame = frame
+    self.policy = policy
+    self.topClassification = topClassification
+    self.isPoseMatch = isPoseMatch
+    self.poseMatchCount = poseMatchCount
+    self.targetFrameRate = targetFrameRate
+    self.captureFramesPerSecond = captureFramesPerSecond
+    self.completedRecognitionFramesPerSecond = completedRecognitionFramesPerSecond
+  }
+
+  public var isTriggerConditionSatisfied: Bool {
+    poseMatchCount >= policy.requiredPoseMatchCount
+  }
+}
+
 public struct DomainExpansionCandidateProgress: Equatable, Sendable {
   public let poseMatchCount: Int
 
@@ -140,36 +246,6 @@ public struct RecognitionFrameCompletion: Equatable, Sendable {
     self.frame = frame
     self.diagnosticGesture = diagnosticGesture
     self.personalRecognizerResult = personalRecognizerResult
-  }
-}
-
-public struct RecognitionDiagnostics: Equatable, Sendable {
-  public let targetFrameRate: RecognitionFrameRate
-  public let captureFramesPerSecond: Double?
-  public let completedRecognitionFramesPerSecond: Double
-  public let diagnosticGesture: DiagnosticGestureResult?
-
-  public init(
-    targetFrameRate: RecognitionFrameRate,
-    captureFramesPerSecond: Double?,
-    completedRecognitionFramesPerSecond: Double,
-    diagnosticGesture: DiagnosticGestureResult?
-  ) {
-    self.targetFrameRate = targetFrameRate
-    self.captureFramesPerSecond = captureFramesPerSecond
-    self.completedRecognitionFramesPerSecond = completedRecognitionFramesPerSecond
-    self.diagnosticGesture = diagnosticGesture
-  }
-
-  public static func initial(
-    targetFrameRate: RecognitionFrameRate
-  ) -> RecognitionDiagnostics {
-    RecognitionDiagnostics(
-      targetFrameRate: targetFrameRate,
-      captureFramesPerSecond: nil,
-      completedRecognitionFramesPerSecond: 0,
-      diagnosticGesture: nil
-    )
   }
 }
 
@@ -366,6 +442,8 @@ public enum AppEvent: Equatable, Sendable {
   case recognitionClockRead(TimeInterval)
   case recognitionFrameCaptured(RecognitionFrameReference)
   case recognitionFrameCompleted(RecognitionFrameCompletion)
+  case recognitionDiagnosticsRequested
+  case recognitionDiagnosticsClosed
   case menuPresented(MenuPresentation)
   case pauseMonitoringRequested
   case resumeMonitoringRequested
@@ -406,7 +484,9 @@ public enum AppEffect: Equatable, Sendable {
   case camera(CameraEffect)
   case recognition(RecognitionEffect)
   case presentMenu(MenuPresentation)
-  case presentRecognitionDiagnostics(RecognitionDiagnostics)
+  case openRecognitionDiagnostics(RecognitionDiagnosticsSession)
+  case closeRecognitionDiagnostics
+  case presentRecognitionDiagnosticsFrame(RecognitionDiagnosticsFrame)
   case clearRecognitionEvidence
   case presentDomainExpansionCandidateProgress(DomainExpansionCandidateProgress?)
   case presentDomainExpansionHUD(DomainExpansionHUDPresentationEffect)
@@ -543,13 +623,15 @@ public final class LaunchCoordinator {
   private var selectedCaptureFramesPerSecond: Double?
   private var inFlightRecognitionFrame: RecognitionFrameReference?
   private var pendingRecognitionFrame: RecognitionFrameReference?
-  private var latestDiagnosticGesture: DiagnosticGestureResult?
   private var recognitionCompletionTimes: [TimeInterval] = []
   private var completedRecognitionFramesPerSecond: Double = 0
   private var recognitionTime: TimeInterval = 0
+  private let domainExpansionPolicy = DomainExpansionRecognitionPolicy.standard
   private var domainExpansionEvidence: [Bool] = []
   private var domainExpansionCandidateProgress: DomainExpansionCandidateProgress?
   private var domainExpansionTriggerState: DomainExpansionTriggerState = .armed
+  private var isRecognitionDiagnosticsOpen = false
+  private var recognitionDiagnosticsEvidence: [Bool] = []
 
   public init() {}
 
@@ -562,6 +644,28 @@ public final class LaunchCoordinator {
     }
 
     switch (state, event) {
+    case (.monitoring(.active), .recognitionDiagnosticsRequested)
+    where !isRecognitionDiagnosticsOpen:
+      isRecognitionDiagnosticsOpen = true
+      recognitionDiagnosticsEvidence.removeAll()
+      domainExpansionEvidence.removeAll()
+      let progressEffects = updateDomainExpansionCandidateProgress(nil)
+      return progressEffects + [
+        .openRecognitionDiagnostics(
+          RecognitionDiagnosticsSession(
+            policy: domainExpansionPolicy,
+            targetFrameRate: targetFrameRate,
+            captureFramesPerSecond: selectedCaptureFramesPerSecond
+          )
+        )
+      ]
+
+    case (_, .recognitionDiagnosticsClosed)
+    where isRecognitionDiagnosticsOpen:
+      isRecognitionDiagnosticsOpen = false
+      recognitionDiagnosticsEvidence.removeAll()
+      return [.closeRecognitionDiagnostics]
+
     case (.awaitingLaunch, .appLaunched):
       state = .configuringMenuBarApplication
       return [.configureMenuBarApplication]
@@ -576,9 +680,6 @@ public final class LaunchCoordinator {
     case (.checkingPersonalRecognizer, .personalRecognizerChecked(.available)):
       state = .monitoring(.awaitingAuthorization)
       return [
-        .presentRecognitionDiagnostics(
-          .initial(targetFrameRate: targetFrameRate)
-        ),
         .presentMenu(.awaitingCameraAuthorization),
         .camera(.requestAuthorization),
       ]
@@ -637,7 +738,7 @@ public final class LaunchCoordinator {
         selection.actualFramesPerSecond <= Double(targetFrameRate.rawValue) + 0.001
       else { return [] }
       selectedCaptureFramesPerSecond = selection.actualFramesPerSecond
-      return [.presentRecognitionDiagnostics(currentRecognitionDiagnostics)]
+      return []
 
     case (
       _,
@@ -1248,12 +1349,7 @@ public final class LaunchCoordinator {
   private func resetRecognitionPipelineEffects() -> Effects {
     let progressEffects = clearDomainExpansionEvidence()
     resetRecognitionFrameProcessingState()
-    return [
-      .clearRecognitionEvidence,
-      .presentRecognitionDiagnostics(
-        .initial(targetFrameRate: targetFrameRate)
-      ),
-    ] + progressEffects
+    return [.clearRecognitionEvidence] + progressEffects
   }
 
   private func resetRecognitionPipelineState() {
@@ -1266,7 +1362,6 @@ public final class LaunchCoordinator {
     selectedCaptureFramesPerSecond = nil
     inFlightRecognitionFrame = nil
     pendingRecognitionFrame = nil
-    latestDiagnosticGesture = nil
     recognitionCompletionTimes.removeAll()
     completedRecognitionFramesPerSecond = 0
   }
@@ -1291,15 +1386,6 @@ public final class LaunchCoordinator {
     default:
       false
     }
-  }
-
-  private var currentRecognitionDiagnostics: RecognitionDiagnostics {
-    RecognitionDiagnostics(
-      targetFrameRate: targetFrameRate,
-      captureFramesPerSecond: selectedCaptureFramesPerSecond,
-      completedRecognitionFramesPerSecond: completedRecognitionFramesPerSecond,
-      diagnosticGesture: latestDiagnosticGesture
-    )
   }
 
   private func handleCaptureInterruption(
@@ -1389,22 +1475,52 @@ public final class LaunchCoordinator {
     inFlightRecognitionFrame = nil
     let completionTime = recognitionTime
     recordRecognitionCompletion(at: completionTime)
-    latestDiagnosticGesture = completion.diagnosticGesture
-    var effects: Effects = [
-      .presentRecognitionDiagnostics(currentRecognitionDiagnostics)
-    ]
-    switch completion.personalRecognizerResult {
-    case .classified(let classifications):
-      effects.append(
-        contentsOf: handleDomainExpansionClassifications(
-          classifications,
-          at: completionTime
+    var effects: Effects
+    if isRecognitionDiagnosticsOpen {
+      var topClassification: PersonalRecognizerClassification?
+      var isPoseMatch: Bool?
+      if case .classified(let classifications) = completion.personalRecognizerResult,
+        let top = domainExpansionPolicy.topClassification(in: classifications)
+      {
+        topClassification = top
+        let poseMatch = domainExpansionPolicy.isPoseMatch(top)
+        isPoseMatch = poseMatch
+        recognitionDiagnosticsEvidence.append(poseMatch)
+        if recognitionDiagnosticsEvidence.count > domainExpansionPolicy.evidenceWindowSize {
+          recognitionDiagnosticsEvidence.removeFirst(
+            recognitionDiagnosticsEvidence.count - domainExpansionPolicy.evidenceWindowSize
+          )
+        }
+      }
+      effects = [
+        .presentRecognitionDiagnosticsFrame(
+          RecognitionDiagnosticsFrame(
+            frame: completion.frame,
+            policy: domainExpansionPolicy,
+            topClassification: topClassification,
+            isPoseMatch: isPoseMatch,
+            poseMatchCount: recognitionDiagnosticsEvidence.lazy.filter { $0 }.count,
+            targetFrameRate: targetFrameRate,
+            captureFramesPerSecond: selectedCaptureFramesPerSecond,
+            completedRecognitionFramesPerSecond: completedRecognitionFramesPerSecond
+          )
         )
-      )
-    case .noHandDetected:
-      effects.append(contentsOf: handleDomainExpansionAbsence(at: completionTime))
-    case .failed:
-      interruptDomainExpansionAbsence()
+      ]
+    } else {
+      effects = []
+      switch completion.personalRecognizerResult {
+      case .classified(let classifications):
+        effects.append(
+          contentsOf: handleDomainExpansionClassifications(
+            classifications,
+            at: completionTime
+          )
+        )
+      case .noHandDetected:
+        effects.append(contentsOf: handleDomainExpansionAbsence(at: completionTime))
+      case .failed:
+        interruptDomainExpansionAbsence()
+      }
     }
 
     if let pendingRecognitionFrame {
@@ -1443,22 +1559,26 @@ public final class LaunchCoordinator {
     _ classifications: [PersonalRecognizerClassification],
     at time: TimeInterval
   ) -> Effects {
-    guard let topClassification = topClassification(in: classifications) else {
+    guard
+      let topClassification = domainExpansionPolicy.topClassification(
+        in: classifications
+      )
+    else {
       interruptDomainExpansionAbsence()
       return []
     }
-    let isPoseMatch =
-      topClassification.label == "domain_expansion"
-      && topClassification.confidence >= 0.75
+    let isPoseMatch = domainExpansionPolicy.isPoseMatch(topClassification)
 
     switch domainExpansionTriggerState {
     case .armed:
       domainExpansionEvidence.append(isPoseMatch)
-      if domainExpansionEvidence.count > 5 {
-        domainExpansionEvidence.removeFirst(domainExpansionEvidence.count - 5)
+      if domainExpansionEvidence.count > domainExpansionPolicy.evidenceWindowSize {
+        domainExpansionEvidence.removeFirst(
+          domainExpansionEvidence.count - domainExpansionPolicy.evidenceWindowSize
+        )
       }
       let poseMatchCount = domainExpansionEvidence.lazy.filter { $0 }.count
-      guard poseMatchCount >= 3 else {
+      guard poseMatchCount >= domainExpansionPolicy.requiredPoseMatchCount else {
         let progress =
           poseMatchCount > 0
           ? DomainExpansionCandidateProgress(poseMatchCount: poseMatchCount)
@@ -1467,7 +1587,9 @@ public final class LaunchCoordinator {
       }
       guard canStartPrimaryWorkflow else {
         return updateDomainExpansionCandidateProgress(
-          DomainExpansionCandidateProgress(poseMatchCount: 2)
+          DomainExpansionCandidateProgress(
+            poseMatchCount: domainExpansionPolicy.requiredPoseMatchCount - 1
+          )
         )
       }
 
@@ -1532,23 +1654,6 @@ public final class LaunchCoordinator {
       triggeredAt: triggeredAt,
       absenceSince: nil
     )
-  }
-
-  private func topClassification(
-    in classifications: [PersonalRecognizerClassification]
-  ) -> PersonalRecognizerClassification? {
-    classifications.reduce(nil) { currentTop, candidate in
-      guard
-        candidate.confidence.isFinite,
-        (0...1).contains(candidate.confidence)
-      else {
-        return currentTop
-      }
-      guard let currentTop else { return candidate }
-      return candidate.confidence > currentTop.confidence
-        ? candidate
-        : currentTop
-    }
   }
 
   private func updateDomainExpansionCandidateProgress(

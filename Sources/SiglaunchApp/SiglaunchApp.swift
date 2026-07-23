@@ -10,7 +10,8 @@ struct SiglaunchApplication: App {
     MenuBarExtra {
       SiglaunchMenu(
         presentation: runtime.menuPresentation,
-        recognitionDiagnostics: runtime.recognitionDiagnostics,
+        recognitionFrameRate: runtime.recognitionFrameRate,
+        isRecognitionDiagnosticsOpen: runtime.isRecognitionDiagnosticsOpen,
         primaryWorkflowPresentation: runtime.primaryWorkflowPresentation,
         poseDatasetImportPresentation: runtime.poseDatasetImportPresentation,
         recognizerTrainingPresentation: runtime.recognizerTrainingPresentation,
@@ -21,6 +22,7 @@ struct SiglaunchApplication: App {
             runtime.selectRecognitionFrameRate(frameRate)
           }
         },
+        onOpenRecognitionDiagnostics: runtime.openRecognitionDiagnostics,
         onImportPoseDataset: runtime.importPoseDataset,
         onStartRecognizerTraining: runtime.startRecognizerTraining,
         onCancelRecognizerTraining: runtime.cancelRecognizerTraining,

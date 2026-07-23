@@ -202,16 +202,18 @@ private final class VisionPersonalRecognizerAnalysis:
       observation = request.results?.first
       diagnostic = try diagnosticAnalyzer.diagnosticResult(from: observation)
     } catch {
-      return failedResult()
+      return failedResult(cameraImage: image)
     }
     guard !cancelled else {
       return VisionRecognitionResult(
+        cameraImage: image,
         diagnosticGesture: diagnostic,
         personalRecognizerResult: .failed
       )
     }
     guard let observation else {
       return VisionRecognitionResult(
+        cameraImage: image,
         diagnosticGesture: diagnostic,
         personalRecognizerResult: .noHandDetected
       )
@@ -225,18 +227,22 @@ private final class VisionPersonalRecognizerAnalysis:
       )
     } catch {
       return VisionRecognitionResult(
+        cameraImage: image,
         diagnosticGesture: diagnostic,
         personalRecognizerResult: .failed
       )
     }
     guard let normalizedHand else {
       return VisionRecognitionResult(
+        cameraImage: image,
         diagnosticGesture: diagnostic,
         personalRecognizerResult: .failed
       )
     }
     do {
       return VisionRecognitionResult(
+        cameraImage: image,
+        normalizedCrop: normalizedHand,
         diagnosticGesture: diagnostic,
         personalRecognizerResult: .classified(
           try classifier.classify(normalizedHand)
@@ -244,6 +250,8 @@ private final class VisionPersonalRecognizerAnalysis:
       )
     } catch {
       return VisionRecognitionResult(
+        cameraImage: image,
+        normalizedCrop: normalizedHand,
         diagnosticGesture: diagnostic,
         personalRecognizerResult: .failed
       )
@@ -257,8 +265,11 @@ private final class VisionPersonalRecognizerAnalysis:
     request.cancel()
   }
 
-  private func failedResult() -> VisionRecognitionResult {
+  private func failedResult(
+    cameraImage: CGImage? = nil
+  ) -> VisionRecognitionResult {
     VisionRecognitionResult(
+      cameraImage: cameraImage,
       diagnosticGesture: DiagnosticGestureResult(
         handDetection: .analysisFailed,
         recognizedJointCount: 0,

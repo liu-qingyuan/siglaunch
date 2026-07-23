@@ -4,13 +4,15 @@ import SwiftUI
 
 struct SiglaunchMenu: View {
   let presentation: MenuPresentation?
-  let recognitionDiagnostics: RecognitionDiagnostics?
+  let recognitionFrameRate: RecognitionFrameRate
+  let isRecognitionDiagnosticsOpen: Bool
   let primaryWorkflowPresentation: PrimaryWorkflowPresentation?
   let poseDatasetImportPresentation: PoseDatasetImportPresentation?
   let recognizerTrainingPresentation: RecognizerTrainingPresentation?
   let onPauseMonitoring: () -> Void
   let onResumeMonitoring: () -> Void
   let onRecognitionFrameRateChange: @Sendable (RecognitionFrameRate) -> Void
+  let onOpenRecognitionDiagnostics: () -> Void
   let onImportPoseDataset: () -> Void
   let onStartRecognizerTraining: () -> Void
   let onCancelRecognizerTraining: () -> Void
@@ -33,12 +35,14 @@ struct SiglaunchMenu: View {
       Label("Checking Personal Recognizer", systemImage: "viewfinder.circle")
     }
 
-    if let recognitionDiagnostics {
+    if presentation == .activeMonitoring,
+      recognizerTrainingPresentation?.isInProgress != true
+    {
       Divider()
       Picker(
         "Recognition Frame Rate",
         selection: Binding(
-          get: { recognitionDiagnostics.targetFrameRate },
+          get: { recognitionFrameRate },
           set: onRecognitionFrameRateChange
         )
       ) {
@@ -46,15 +50,7 @@ struct SiglaunchMenu: View {
         Text("15 FPS").tag(RecognitionFrameRate.fps15)
         Text("30 FPS").tag(RecognitionFrameRate.fps30)
       }
-      .disabled(presentation != .activeMonitoring)
-      let content = recognitionDiagnostics.content
-      Label(content.title, systemImage: content.symbolName)
-      if let detail = content.detail {
-        Text(detail)
-      }
-      if let handDetail = recognitionDiagnostics.handDetail {
-        Text(handDetail)
-      }
+      .disabled(isRecognitionDiagnosticsOpen)
     }
 
     if let content = primaryWorkflowPresentation?.content {
@@ -89,8 +85,20 @@ struct SiglaunchMenu: View {
 
     if recognizerTrainingPresentation?.isInProgress != true {
       switch presentation {
-      case .activeMonitoring, .awaitingCameraAuthorization, .captureInterrupted,
-        .cameraUnavailable:
+      case .activeMonitoring:
+        Button(action: onOpenRecognitionDiagnostics) {
+          Label(
+            isRecognitionDiagnosticsOpen
+              ? "Show Recognition Diagnostics"
+              : "Open Recognition Diagnostics",
+            systemImage: "waveform.path.ecg"
+          )
+        }
+        Button(action: onPauseMonitoring) {
+          Label("Pause Monitoring", systemImage: "pause.fill")
+        }
+        .disabled(isRecognitionDiagnosticsOpen)
+      case .awaitingCameraAuthorization, .captureInterrupted, .cameraUnavailable:
         Button(action: onPauseMonitoring) {
           Label("Pause Monitoring", systemImage: "pause.fill")
         }
@@ -153,66 +161,6 @@ struct MenuStatusContent {
   let title: String
   let symbolName: String
   let detail: String?
-}
-
-extension DomainExpansionCandidateProgress {
-  var symbolName: String {
-    switch poseMatchCount {
-    case 1:
-      "1.circle.fill"
-    case 2:
-      "2.circle.fill"
-    default:
-      "viewfinder.circle"
-    }
-  }
-}
-
-extension RecognitionDiagnostics {
-  var content: MenuStatusContent {
-    MenuStatusContent(
-      title: "Recognition Diagnostics",
-      symbolName: diagnosticGesture?.isOpenPalm == true
-        ? "hand.raised.fill"
-        : "speedometer",
-      detail: [
-        "Target: \(targetFrameRate.rawValue) FPS",
-        "Capture: \(captureFramesPerSecond.map(formatFPS) ?? "pending")",
-        "Completed: \(formatFPS(completedRecognitionFramesPerSecond))",
-      ].joined(separator: " | ")
-    )
-  }
-
-  var handDetail: String? {
-    guard let diagnosticGesture else { return nil }
-    return [
-      "Hand: \(diagnosticGesture.handDetection.menuDescription)",
-      "Joints: \(diagnosticGesture.recognizedJointCount)",
-      "Extended: \(diagnosticGesture.extendedFingerCount)",
-      "Open palm: \(diagnosticGesture.isOpenPalm ? "yes" : "no")",
-    ].joined(separator: " | ")
-  }
-
-  private func formatFPS(_ value: Double) -> String {
-    let rounded = value.rounded()
-    if abs(value - rounded) < 0.05 {
-      return "\(Int(rounded)) FPS"
-    }
-    return String(format: "%.1f FPS", value)
-  }
-}
-
-extension DiagnosticHandDetection {
-  fileprivate var menuDescription: String {
-    switch self {
-    case .detected:
-      "detected"
-    case .notDetected:
-      "not detected"
-    case .analysisFailed:
-      "analysis failed"
-    }
-  }
 }
 
 private struct RecognizerTrainingMenuDescriptor {

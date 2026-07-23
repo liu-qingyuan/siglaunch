@@ -4,41 +4,53 @@ import XCTest
 @testable import SiglaunchApp
 
 final class SiglaunchMenuTests: XCTestCase {
-  func testRecognitionDiagnosticsExposeRatesAndJointStatus() {
-    let diagnostics = RecognitionDiagnostics(
-      targetFrameRate: .fps15,
-      captureFramesPerSecond: 12,
-      completedRecognitionFramesPerSecond: 9.75,
-      diagnosticGesture: DiagnosticGestureResult(
-        handDetection: .detected,
-        recognizedJointCount: 21,
-        extendedFingerCount: 5,
-        isOpenPalm: true
+  func testRecognitionDiagnosticsSnapshotExposesClassifierFacts() {
+    let frame = RecognitionFrameReference(
+      lifecycleID: RecognitionLifecycleID(rawValue: 1),
+      sequenceNumber: 1
+    )
+    let top = PersonalRecognizerClassification(
+      label: "domain_expansion",
+      confidence: 0.9
+    )
+    let snapshot = RecognitionDiagnosticsSnapshot(
+      diagnostics: RecognitionDiagnosticsFrame(
+        frame: frame,
+        policy: .standard,
+        topClassification: top,
+        isPoseMatch: true,
+        poseMatchCount: 3,
+        targetFrameRate: .fps15,
+        captureFramesPerSecond: 12,
+        completedRecognitionFramesPerSecond: 9.75
+      ),
+      analysis: RecognitionAnalysis(
+        frame: frame,
+        cameraImage: nil,
+        normalizedCrop: nil,
+        diagnosticGesture: DiagnosticGestureResult(
+          handDetection: .detected,
+          recognizedJointCount: 21,
+          extendedFingerCount: 2,
+          isOpenPalm: false
+        ),
+        personalRecognizerResult: .classified([top])
       )
     )
 
-    XCTAssertEqual(
-      diagnostics.content.detail,
-      "Target: 15 FPS | Capture: 12 FPS | Completed: 9.8 FPS"
-    )
-    XCTAssertEqual(
-      diagnostics.handDetail,
-      "Hand: detected | Joints: 21 | Extended: 5 | Open palm: yes"
-    )
-    XCTAssertEqual(
-      RecognitionFrameRate.allCases,
-      [.fps10, .fps15, .fps30]
-    )
+    XCTAssertEqual(snapshot.topCategoryText, "domain_expansion")
+    XCTAssertEqual(snapshot.confidenceText, "0.900")
+    XCTAssertEqual(snapshot.poseMatchText, "Yes")
+    XCTAssertEqual(snapshot.evidenceText, "3/5")
+    XCTAssertEqual(snapshot.conditionText, "Met")
+    XCTAssertEqual(snapshot.outcomeTitle, "Frame unavailable")
+    XCTAssertEqual(RecognitionFrameRate.allCases, [.fps10, .fps15, .fps30])
   }
 
-  func testDomainExpansionCandidateProgressUsesMenuBarIconsOnly() {
+  func testActiveMonitoringUsesAStableMenuBarSymbol() {
     XCTAssertEqual(
-      DomainExpansionCandidateProgress(poseMatchCount: 1).symbolName,
-      "1.circle.fill"
-    )
-    XCTAssertEqual(
-      DomainExpansionCandidateProgress(poseMatchCount: 2).symbolName,
-      "2.circle.fill"
+      MenuPresentation.activeMonitoring.content.symbolName,
+      "viewfinder.circle"
     )
   }
 

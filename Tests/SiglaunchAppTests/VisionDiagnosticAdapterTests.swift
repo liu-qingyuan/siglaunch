@@ -49,7 +49,7 @@ final class VisionDiagnosticAdapterTests: XCTestCase {
         )
       )
       let completed = expectation(description: "\(testCase.fixture) completed")
-      var observedCompletion: RecognitionFrameCompletion?
+      var observedCompletion: RecognitionAnalysis?
 
       adapter.execute(.analyzeFrame(reference)) { completion in
         observedCompletion = completion
@@ -87,24 +87,30 @@ final class VisionDiagnosticAdapterTests: XCTestCase {
       lifecycleID: RecognitionLifecycleID(rawValue: 1),
       sequenceNumber: 1
     )
+    let cameraImage = try loadFixture(named: "open-palm")
     adapter.receive(
       CapturedRecognitionFrame(
         reference: reference,
-        pixelBuffer: try pixelBuffer(from: loadFixture(named: "open-palm"))
+        pixelBuffer: try pixelBuffer(from: cameraImage)
       )
     )
     let completed = expectation(description: "Vision and classifier completed")
-    var observedCompletion: RecognitionFrameCompletion?
+    var observedAnalysis: RecognitionAnalysis?
 
-    adapter.execute(.analyzeFrame(reference)) { completion in
-      observedCompletion = completion
+    adapter.execute(.analyzeFrame(reference)) { analysis in
+      observedAnalysis = analysis
       completed.fulfill()
     }
     await fulfillment(of: [completed], timeout: 3)
 
+    XCTAssertEqual(observedAnalysis?.frame, reference)
+    XCTAssertEqual(observedAnalysis?.cameraImage?.width, cameraImage.width)
+    XCTAssertEqual(observedAnalysis?.cameraImage?.height, cameraImage.height)
+    XCTAssertEqual(observedAnalysis?.normalizedCrop?.width, 224)
+    XCTAssertEqual(observedAnalysis?.normalizedCrop?.height, 224)
     XCTAssertEqual(classifier.imageSizes, [CGSize(width: 224, height: 224)])
     XCTAssertEqual(
-      observedCompletion?.personalRecognizerResult,
+      observedAnalysis?.personalRecognizerResult,
       .classified(classifier.classifications)
     )
   }
@@ -177,7 +183,7 @@ final class VisionDiagnosticAdapterTests: XCTestCase {
       )
     )
     let completed = expectation(description: "handless frame completed")
-    var observedCompletion: RecognitionFrameCompletion?
+    var observedCompletion: RecognitionAnalysis?
 
     adapter.execute(.analyzeFrame(reference)) { completion in
       observedCompletion = completion
@@ -187,6 +193,8 @@ final class VisionDiagnosticAdapterTests: XCTestCase {
 
     XCTAssertEqual(observedCompletion?.diagnosticGesture.handDetection, .notDetected)
     XCTAssertEqual(observedCompletion?.personalRecognizerResult, .noHandDetected)
+    XCTAssertNotNil(observedCompletion?.cameraImage)
+    XCTAssertNil(observedCompletion?.normalizedCrop)
     XCTAssertTrue(classifier.imageSizes.isEmpty)
   }
 
@@ -208,7 +216,7 @@ final class VisionDiagnosticAdapterTests: XCTestCase {
       )
     )
     let completed = expectation(description: "failed classification completed")
-    var observedCompletion: RecognitionFrameCompletion?
+    var observedCompletion: RecognitionAnalysis?
 
     adapter.execute(.analyzeFrame(reference)) { completion in
       observedCompletion = completion
@@ -218,6 +226,9 @@ final class VisionDiagnosticAdapterTests: XCTestCase {
 
     XCTAssertEqual(observedCompletion?.diagnosticGesture.handDetection, .detected)
     XCTAssertEqual(observedCompletion?.personalRecognizerResult, .failed)
+    XCTAssertNotNil(observedCompletion?.cameraImage)
+    XCTAssertEqual(observedCompletion?.normalizedCrop?.width, 224)
+    XCTAssertEqual(observedCompletion?.normalizedCrop?.height, 224)
   }
 
   @MainActor
@@ -240,7 +251,7 @@ final class VisionDiagnosticAdapterTests: XCTestCase {
       )
     )
     let completed = expectation(description: "missing crop completed")
-    var observedCompletion: RecognitionFrameCompletion?
+    var observedCompletion: RecognitionAnalysis?
 
     adapter.execute(.analyzeFrame(reference)) { completion in
       observedCompletion = completion
@@ -250,6 +261,8 @@ final class VisionDiagnosticAdapterTests: XCTestCase {
 
     XCTAssertEqual(observedCompletion?.diagnosticGesture.handDetection, .detected)
     XCTAssertEqual(observedCompletion?.personalRecognizerResult, .failed)
+    XCTAssertNotNil(observedCompletion?.cameraImage)
+    XCTAssertNil(observedCompletion?.normalizedCrop)
     XCTAssertTrue(classifier.imageSizes.isEmpty)
   }
 
@@ -306,7 +319,7 @@ final class VisionDiagnosticAdapterTests: XCTestCase {
         )
       )
       let completed = expectation(description: "\(testCase.name) classified")
-      var observedCompletion: RecognitionFrameCompletion?
+      var observedCompletion: RecognitionAnalysis?
       adapter.execute(.analyzeFrame(reference)) { completion in
         observedCompletion = completion
         completed.fulfill()
