@@ -22,7 +22,10 @@ struct RecognitionDiagnosticsSnapshot: @unchecked Sendable {
   }
 
   var cameraImage: CGImage? { analysis.cameraImage }
-  var normalizedCrop: CGImage? { analysis.normalizedCrop }
+  var normalizedCrop: CGImage? {
+    guard cameraImage != nil else { return nil }
+    return analysis.normalizedCrop
+  }
   var diagnosticGesture: DiagnosticGestureResult {
     analysis.diagnosticGesture
   }

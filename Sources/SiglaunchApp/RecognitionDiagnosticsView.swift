@@ -198,18 +198,24 @@ private struct DiagnosticImagePane: View {
 
 extension RecognitionDiagnosticsSnapshot {
   var topCategoryText: String {
-    diagnostics.topClassification?.label ?? "Unavailable"
+    guard cameraImage != nil else { return "Unavailable" }
+    return diagnostics.topClassification?.label ?? "Unavailable"
   }
 
   var confidenceText: String {
-    guard let confidence = diagnostics.topClassification?.confidence else {
+    guard
+      cameraImage != nil,
+      let confidence = diagnostics.topClassification?.confidence
+    else {
       return "Unavailable"
     }
     return String(format: "%.3f", confidence)
   }
 
   var poseMatchText: String {
-    guard let isPoseMatch = diagnostics.isPoseMatch else { return "Unavailable" }
+    guard cameraImage != nil, let isPoseMatch = diagnostics.isPoseMatch else {
+      return "Unavailable"
+    }
     return isPoseMatch ? "Yes" : "No"
   }
 

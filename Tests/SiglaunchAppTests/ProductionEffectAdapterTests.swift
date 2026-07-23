@@ -243,6 +243,110 @@ final class ProductionEffectAdapterTests: XCTestCase {
     )
   }
 
+  func testPausedDiagnosticsUsesAndReleasesTheExistingCameraPipeline() throws {
+    let cameraAdapter = FakeCameraAdapter()
+    let cameraImage = try makeImage(width: 64, height: 48)
+    let normalizedCrop = try makeImage(width: 224, height: 224)
+    let recognitionAdapter = FakeRecognitionAdapter(
+      diagnostic: DiagnosticGestureResult(
+        handDetection: .detected,
+        recognizedJointCount: 21,
+        extendedFingerCount: 2,
+        isOpenPalm: false
+      ),
+      classifications: [
+        PersonalRecognizerClassification(
+          label: "domain_expansion",
+          confidence: 0.9
+        )
+      ],
+      cameraImage: cameraImage,
+      normalizedCrop: normalizedCrop
+    )
+    let coordinator = LaunchCoordinator()
+    for event in [
+      AppEvent.appLaunched,
+      .menuBarApplicationConfigurationCompleted(.succeeded),
+    ] {
+      _ = coordinator.handle(event)
+    }
+
+    var menuPresentations: [MenuPresentation] = []
+    var snapshots: [RecognitionDiagnosticsSnapshot] = []
+    var openedSessionCount = 0
+    var closedSessionCount = 0
+    var workflowPresentations: [PrimaryWorkflowPresentation?] = []
+    var sendEvent: ((AppEvent) -> Void)!
+    var effectAdapter: ProductionEffectAdapter!
+    effectAdapter = ProductionEffectAdapter(
+      recognizerStore: PersonalRecognizerStore(),
+      cameraAdapter: cameraAdapter,
+      recognitionAdapter: recognitionAdapter,
+      eventSink: { event in sendEvent(event) },
+      menuSink: { menuPresentations.append($0) },
+      workflowSink: { workflowPresentations.append($0) },
+      recognitionDiagnosticsSink: { update in
+        switch update {
+        case .opened:
+          openedSessionCount += 1
+        case .snapshot(let snapshot):
+          snapshots.append(snapshot)
+        case .closed:
+          closedSessionCount += 1
+        }
+      }
+    )
+    sendEvent = { event in
+      for effect in coordinator.handle(event) {
+        effectAdapter.execute(effect)
+      }
+    }
+
+    sendEvent(.personalRecognizerChecked(.available))
+    sendEvent(.pauseMonitoringRequested)
+    sendEvent(.recognitionDiagnosticsRequested)
+    let frame = try makeCapturedFrame(sequenceNumber: 1, lifecycleID: 2)
+    cameraAdapter.emit(frame)
+    sendEvent(.recognitionDiagnosticsClosed)
+
+    XCTAssertEqual(
+      cameraAdapter.executedEffects,
+      [
+        .requestAuthorization,
+        .startBuiltInCamera(
+          targetFrameRate: .fps15,
+          lifecycleID: RecognitionLifecycleID(rawValue: 1)
+        ),
+        .stopAndReleaseCamera,
+        .requestAuthorization,
+        .startBuiltInCamera(
+          targetFrameRate: .fps15,
+          lifecycleID: RecognitionLifecycleID(rawValue: 2)
+        ),
+        .stopAndReleaseCamera,
+      ]
+    )
+    XCTAssertEqual(
+      recognitionAdapter.executedEffects,
+      [.analyzeFrame(frame.reference)]
+    )
+    XCTAssertEqual(
+      menuPresentations,
+      [
+        .awaitingCameraAuthorization,
+        .activeMonitoring,
+        .pausedMonitoring,
+        .pausedMonitoring,
+      ]
+    )
+    XCTAssertEqual(openedSessionCount, 1)
+    XCTAssertEqual(closedSessionCount, 1)
+    XCTAssertEqual(snapshots.count, 1)
+    XCTAssertTrue(snapshots.first?.cameraImage === cameraImage)
+    XCTAssertTrue(snapshots.first?.normalizedCrop === normalizedCrop)
+    XCTAssertTrue(workflowPresentations.isEmpty)
+  }
+
   func testCameraFramesPublishOnlyAcceptedSameFrameDiagnostics() throws {
     let cameraAdapter = FakeCameraAdapter()
     let diagnostic = DiagnosticGestureResult(
@@ -800,7 +904,8 @@ final class ProductionEffectAdapterTests: XCTestCase {
   }
 
   private func makeCapturedFrame(
-    sequenceNumber: UInt64
+    sequenceNumber: UInt64,
+    lifecycleID: UInt64 = 1
   ) throws -> CapturedRecognitionFrame {
     var pixelBuffer: CVPixelBuffer?
     let status = CVPixelBufferCreate(
@@ -816,7 +921,7 @@ final class ProductionEffectAdapterTests: XCTestCase {
     }
     return CapturedRecognitionFrame(
       reference: RecognitionFrameReference(
-        lifecycleID: RecognitionLifecycleID(rawValue: 1),
+        lifecycleID: RecognitionLifecycleID(rawValue: lifecycleID),
         sequenceNumber: sequenceNumber
       ),
       pixelBuffer: pixelBuffer

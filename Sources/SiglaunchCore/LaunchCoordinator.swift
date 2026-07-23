@@ -564,6 +564,11 @@ public final class LaunchCoordinator {
     case unavailable(CameraUnavailableReason)
   }
 
+  private enum RecognitionDiagnosticsMonitoringIntent {
+    case active
+    case paused
+  }
+
   private enum State {
     case awaitingLaunch
     case configuringMenuBarApplication
@@ -630,7 +635,7 @@ public final class LaunchCoordinator {
   private var domainExpansionEvidence: [Bool] = []
   private var domainExpansionCandidateProgress: DomainExpansionCandidateProgress?
   private var domainExpansionTriggerState: DomainExpansionTriggerState = .armed
-  private var isRecognitionDiagnosticsOpen = false
+  private var recognitionDiagnosticsMonitoringIntent: RecognitionDiagnosticsMonitoringIntent?
   private var recognitionDiagnosticsEvidence: [Bool] = []
 
   public init() {}
@@ -645,8 +650,8 @@ public final class LaunchCoordinator {
 
     switch (state, event) {
     case (.monitoring(.active), .recognitionDiagnosticsRequested)
-    where !isRecognitionDiagnosticsOpen:
-      isRecognitionDiagnosticsOpen = true
+    where recognitionDiagnosticsMonitoringIntent == nil:
+      recognitionDiagnosticsMonitoringIntent = .active
       recognitionDiagnosticsEvidence.removeAll()
       domainExpansionEvidence.removeAll()
       let progressEffects = updateDomainExpansionCandidateProgress(nil)
@@ -660,11 +665,33 @@ public final class LaunchCoordinator {
         )
       ]
 
-    case (_, .recognitionDiagnosticsClosed)
-    where isRecognitionDiagnosticsOpen:
-      isRecognitionDiagnosticsOpen = false
+    case (.monitoring(.paused), .recognitionDiagnosticsRequested)
+    where recognitionDiagnosticsMonitoringIntent == nil:
+      recognitionDiagnosticsMonitoringIntent = .paused
       recognitionDiagnosticsEvidence.removeAll()
-      return [.closeRecognitionDiagnostics]
+      state = .monitoring(.awaitingAuthorization)
+      return [
+        .openRecognitionDiagnostics(
+          RecognitionDiagnosticsSession(
+            policy: domainExpansionPolicy,
+            targetFrameRate: targetFrameRate,
+            captureFramesPerSecond: nil
+          )
+        ),
+        .camera(.requestAuthorization),
+      ]
+
+    case (_, .recognitionDiagnosticsClosed)
+    where recognitionDiagnosticsMonitoringIntent == .paused:
+      return closePausedMonitoringDiagnostics()
+
+    case (_, .recognitionDiagnosticsClosed)
+    where recognitionDiagnosticsMonitoringIntent == .active:
+      recognitionDiagnosticsMonitoringIntent = nil
+      recognitionDiagnosticsEvidence.removeAll()
+      inFlightRecognitionFrame = nil
+      pendingRecognitionFrame = nil
+      return [.clearRecognitionEvidence, .closeRecognitionDiagnostics]
 
     case (.awaitingLaunch, .appLaunched):
       state = .configuringMenuBarApplication
@@ -791,11 +818,14 @@ public final class LaunchCoordinator {
       (.monitoring(.startingCapture), .camera(.cameraSwitchDetected)),
       (.monitoring(.interrupted), .camera(.cameraSwitchDetected)):
       state = .monitoring(.rebuildingCapture)
-      let resetEffects = resetRecognitionPipelineEffects()
-      return resetEffects + [
-        .camera(nextRebuildBuiltInCameraEffect()),
-        .presentMenu(.captureInterrupted),
-      ]
+      var effects =
+        resetRecognitionPipelineEffects() + [
+          .camera(nextRebuildBuiltInCameraEffect())
+        ]
+      if recognitionDiagnosticsMonitoringIntent != .paused {
+        effects.append(.presentMenu(.captureInterrupted))
+      }
+      return effects
 
     case (.monitoring(.paused), .camera(.cameraSwitchDetected)),
       (.monitoring(.awaitingAuthorization), .camera(.cameraSwitchDetected)),
@@ -809,10 +839,14 @@ public final class LaunchCoordinator {
       state = .monitoring(
         .releasing(.sleeping(.startCapture, wakeReceived: false))
       )
-      return resetRecognitionPipelineEffects() + [
-        .camera(.stopAndReleaseCamera),
-        .presentMenu(.captureInterrupted),
-      ]
+      var effects =
+        resetRecognitionPipelineEffects() + [
+          .camera(.stopAndReleaseCamera)
+        ]
+      if recognitionDiagnosticsMonitoringIntent != .paused {
+        effects.append(.presentMenu(.captureInterrupted))
+      }
+      return effects
 
     case (.monitoring(.paused), .camera(.systemWillSleep)):
       state = .monitoring(.sleeping(.remainPaused))
@@ -964,7 +998,10 @@ public final class LaunchCoordinator {
       ]
 
     case (.monitoring(.active), .recognizerTrainingRequested):
-      guard let input = validatedTrainingInput else { return [] }
+      guard
+        recognitionDiagnosticsMonitoringIntent == nil,
+        let input = validatedTrainingInput
+      else { return [] }
       let context = RecognizerTrainingContext(
         input: input,
         priorState: .activeMonitoring
@@ -1136,16 +1173,16 @@ public final class LaunchCoordinator {
       (.monitoring(.rebuildingCapture), .quitRequested):
       state = .monitoring(.releasing(.terminated))
       primaryWorkflowState = .idle
-      return resetRecognitionPipelineEffects() + [
-        .camera(.stopAndReleaseCamera)
-      ]
+      return endRecognitionDiagnosticsSession()
+        + resetRecognitionPipelineEffects()
+        + [.camera(.stopAndReleaseCamera)]
 
     case (.monitoring(.releasing(.paused)), .quitRequested),
       (.monitoring(.releasing(.sleeping)), .quitRequested),
       (.monitoring(.releasing(.unavailable)), .quitRequested):
       state = .monitoring(.releasing(.terminated))
       primaryWorkflowState = .idle
-      return []
+      return endRecognitionDiagnosticsSession()
 
     case (
       .monitoring(.releasing(.terminated)),
@@ -1170,7 +1207,7 @@ public final class LaunchCoordinator {
       (.poseDatasetReady, .quitRequested):
       state = .terminated
       primaryWorkflowState = .idle
-      return [.terminateApplication]
+      return endRecognitionDiagnosticsSession() + [.terminateApplication]
 
     default:
       return handlePrimaryWorkflow(event)
@@ -1301,6 +1338,9 @@ public final class LaunchCoordinator {
       return [.camera(nextStartBuiltInCameraEffect())]
     case .requestAuthorization:
       state = .monitoring(.awaitingAuthorization)
+      if recognitionDiagnosticsMonitoringIntent == .paused {
+        return [.camera(.requestAuthorization)]
+      }
       return [
         .presentMenu(.awaitingCameraAuthorization),
         .camera(.requestAuthorization),
@@ -1397,10 +1437,14 @@ public final class LaunchCoordinator {
       .monitoring(.startingCapture),
       .monitoring(.rebuildingCapture):
       state = .monitoring(.interrupted)
-      return resetRecognitionPipelineEffects() + [
-        .camera(.stopCapture),
-        .presentMenu(.captureInterrupted),
-      ]
+      var effects =
+        resetRecognitionPipelineEffects() + [
+          .camera(.stopCapture)
+        ]
+      if recognitionDiagnosticsMonitoringIntent != .paused {
+        effects.append(.presentMenu(.captureInterrupted))
+      }
+      return effects
     default:
       return []
     }
@@ -1416,6 +1460,9 @@ public final class LaunchCoordinator {
     case (.monitoring(.startingCapture), .succeeded),
       (.monitoring(.rebuildingCapture), .succeeded):
       state = .monitoring(.active)
+      if recognitionDiagnosticsMonitoringIntent == .paused {
+        return []
+      }
       return [.presentMenu(.activeMonitoring)]
     case (.monitoring(.active), .failed(let failure)):
       return releaseCameraBecauseUnavailable(.capture(failure))
@@ -1476,7 +1523,7 @@ public final class LaunchCoordinator {
     let completionTime = recognitionTime
     recordRecognitionCompletion(at: completionTime)
     var effects: Effects
-    if isRecognitionDiagnosticsOpen {
+    if recognitionDiagnosticsMonitoringIntent != nil {
       var topClassification: PersonalRecognizerClassification?
       var isPoseMatch: Bool?
       if case .classified(let classifications) = completion.personalRecognizerResult,
@@ -1529,6 +1576,49 @@ public final class LaunchCoordinator {
       effects.append(.recognition(.analyzeFrame(pendingRecognitionFrame)))
     }
     return effects
+  }
+
+  private func endRecognitionDiagnosticsSession() -> Effects {
+    guard recognitionDiagnosticsMonitoringIntent != nil else { return [] }
+    recognitionDiagnosticsMonitoringIntent = nil
+    recognitionDiagnosticsEvidence.removeAll()
+    return [.closeRecognitionDiagnostics]
+  }
+
+  private func closePausedMonitoringDiagnostics() -> Effects {
+    recognitionDiagnosticsMonitoringIntent = nil
+    recognitionDiagnosticsEvidence.removeAll()
+    let closeEffects: Effects = [.closeRecognitionDiagnostics]
+
+    switch state {
+    case .monitoring(.active),
+      .monitoring(.startingCapture),
+      .monitoring(.rebuildingCapture):
+      state = .monitoring(.releasing(.paused))
+      return closeEffects + resetRecognitionPipelineEffects() + [
+        .camera(.stopAndReleaseCamera)
+      ]
+    case .monitoring(.interrupted):
+      state = .monitoring(.releasing(.paused))
+      return closeEffects + [.camera(.stopAndReleaseCamera)]
+    case .monitoring(.awaitingAuthorization),
+      .monitoring(.unavailable):
+      state = .monitoring(.paused)
+      return closeEffects + [.presentMenu(.pausedMonitoring)]
+    case .monitoring(.releasing(.sleeping(_, let wakeReceived))):
+      state = .monitoring(
+        .releasing(.sleeping(.remainPaused, wakeReceived: wakeReceived))
+      )
+      return closeEffects
+    case .monitoring(.sleeping):
+      state = .monitoring(.sleeping(.remainPaused))
+      return closeEffects
+    case .monitoring(.releasing(.unavailable)):
+      state = .monitoring(.releasing(.paused))
+      return closeEffects
+    default:
+      return closeEffects
+    }
   }
 
   private func recordRecognitionCompletion(at completionTime: TimeInterval) {

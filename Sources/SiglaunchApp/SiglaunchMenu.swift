@@ -103,9 +103,18 @@ struct SiglaunchMenu: View {
           Label("Pause Monitoring", systemImage: "pause.fill")
         }
       case .pausedMonitoring:
+        Button(action: onOpenRecognitionDiagnostics) {
+          Label(
+            isRecognitionDiagnosticsOpen
+              ? "Show Recognition Diagnostics"
+              : "Open Recognition Diagnostics",
+            systemImage: "waveform.path.ecg"
+          )
+        }
         Button(action: onResumeMonitoring) {
           Label("Resume Monitoring", systemImage: "play.fill")
         }
+        .disabled(isRecognitionDiagnosticsOpen)
       default:
         EmptyView()
       }
@@ -125,7 +134,10 @@ struct SiglaunchMenu: View {
       Button(action: onStartRecognizerTraining) {
         Label("Train Personal Recognizer", systemImage: "cpu")
       }
-      .disabled(recognizerTrainingPresentation?.isInProgress == true)
+      .disabled(
+        isRecognitionDiagnosticsOpen
+          || recognizerTrainingPresentation?.isInProgress == true
+      )
     }
 
     if recognizerTrainingPresentation?.isCancellable == true {
