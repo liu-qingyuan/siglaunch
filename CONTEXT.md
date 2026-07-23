@@ -56,6 +56,10 @@ _Avoid_: Model Upload, Cloud Training
 一个完成分类的摄像头帧被认定呈现了 Domain Expansion Pose。
 _Avoid_: Hit, Positive Frame
 
+**Recognition Success**:
+在 Active Monitoring 且已 Rearm 时，系统确认 Trigger Gesture，并以同一触发显示 Domain Expansion HUD、且仅启动一次 Primary Workflow。Workflow 的最终结果不属于 Recognition Success。
+_Avoid_: Workflow Success, HUD Display
+
 **Rearm**:
 Trigger Gesture 成功后，系统重新获得触发 Workflow 资格的状态转换。
 _Avoid_: Reset, Reactivate
@@ -63,6 +67,14 @@ _Avoid_: Reset, Reactivate
 **Diagnostic Gesture**:
 用于验证摄像头与手部姿态检测、但绝不会启动 Workflow 的简单静态手势。
 _Avoid_: Test Gesture
+
+**Recognition Diagnostics**:
+用户从菜单栏打开的只读实时识别窗口，用于直接查看分类器输入、当前判定和固定触发规则；打开窗口不会启动 Workflow，也不会修改 Personal Recognizer。
+_Avoid_: Calibration Mode, Validation Session
+
+**Siglaunch App Bundle**:
+安装在 `/Applications/Siglaunch.app`、供用户日常打开 Siglaunch 的本地 macOS App；SwiftPM 的 `.build` 可执行文件只用于开发。
+_Avoid_: Development Executable, Menu Bar Item
 
 **Workspace**:
 一个可被 Workflow 启动或恢复的项目工作环境。
