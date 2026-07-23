@@ -67,9 +67,7 @@ final class GhosttyAppleScriptAdapter {
     knownTerminalID: String?
   ) -> String? {
     guard
-      let environmentLiteral = appleScriptLiteral(
-        "SIGLAUNCH_HERDR_PATH=\(herdrExecutablePath)"
-      ),
+      let commandLiteral = appleScriptLiteral(herdrExecutablePath),
       let terminalIDLiteral = appleScriptLiteral(knownTerminalID ?? "")
     else {
       return nil
@@ -77,26 +75,35 @@ final class GhosttyAppleScriptAdapter {
 
     return #"""
       tell application id "com.mitchellh.ghostty"
-        -- A title alone cannot distinguish default and named Herdr Sessions.
         set knownTerminalID to \#(terminalIDLiteral)
         if knownTerminalID is not "" then
           repeat with candidateTerminal in terminals
             if (id of candidateTerminal) is knownTerminalID then
-              if (name of candidateTerminal) is "herdr" then
-                focus candidateTerminal
-                return {"reused", knownTerminalID}
-              end if
-              return {"pending", knownTerminalID}
+              focus candidateTerminal
+              return {"reused", knownTerminalID}
             end if
           end repeat
         end if
 
+        repeat with candidateTerminal in terminals
+          set terminalName to name of candidateTerminal
+          if terminalName starts with "herdr" or terminalName is "👻" then
+            set discoveredTerminalID to id of candidateTerminal
+            focus candidateTerminal
+            return {"reused", discoveredTerminalID}
+          end if
+        end repeat
+
         set sessionConfiguration to new surface configuration
-        set environment variables of sessionConfiguration to {\#(environmentLiteral)}
-        set command of sessionConfiguration to "exec \"$SIGLAUNCH_HERDR_PATH\""
-        set wait after command of sessionConfiguration to true
-        set createdWindow to new window with configuration sessionConfiguration
-        set createdTerminal to terminal 1 of createdWindow
+        set command of sessionConfiguration to \#(commandLiteral)
+        set wait after command of sessionConfiguration to false
+        if (count of windows) > 0 then
+          set createdTab to new tab in front window with configuration sessionConfiguration
+          set createdTerminal to terminal 1 of createdTab
+        else
+          set createdWindow to new window with configuration sessionConfiguration
+          set createdTerminal to terminal 1 of createdWindow
+        end if
         set createdTerminalID to id of createdTerminal
         return {"pending", createdTerminalID}
       end tell
@@ -111,10 +118,8 @@ final class GhosttyAppleScriptAdapter {
         set expectedTerminalID to \#(terminalIDLiteral)
         repeat with candidateTerminal in terminals
           if (id of candidateTerminal) is expectedTerminalID then
-            if (name of candidateTerminal) is "herdr" then
-              return {"ready", expectedTerminalID}
-            end if
-            return {"waiting", expectedTerminalID}
+            focus candidateTerminal
+            return {"ready", expectedTerminalID}
           end if
         end repeat
         return {"missing", expectedTerminalID}
@@ -150,9 +155,9 @@ final class GhosttyAppleScriptAdapter {
     completion: @escaping @MainActor @Sendable (DefaultHerdrSessionEnsureResult) -> Void
   ) {
     Task { @MainActor in
-      for _ in 0..<50 {
+      for _ in 0..<10 {
         do {
-          try await Task.sleep(for: .milliseconds(100))
+          try await Task.sleep(for: .milliseconds(500))
         } catch {
           completion(.herdrUnavailable)
           return

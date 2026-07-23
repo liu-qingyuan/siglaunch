@@ -6,7 +6,7 @@ import XCTest
 
 @MainActor
 final class GhosttyAppleScriptAdapterTests: XCTestCase {
-  func testUsesAbsoluteHerdrEnvironmentWithoutSyntheticTerminalInput() throws {
+  func testReusesHerdrBeforeLaunchingDirectlyInExistingGhosttyWindow() throws {
     let executablePath = "/tmp/Herdr Install/herdr"
     let source = try XCTUnwrap(
       GhosttyAppleScriptAdapter.source(
@@ -17,20 +17,26 @@ final class GhosttyAppleScriptAdapterTests: XCTestCase {
     let normalizedSource = source.lowercased()
 
     XCTAssertTrue(normalizedSource.contains("id of candidateterminal"))
+    XCTAssertTrue(normalizedSource.contains("return {\"reused\", knownterminalid}"))
     XCTAssertTrue(normalizedSource.contains("name of candidateterminal"))
-    XCTAssertTrue(normalizedSource.contains("return {\"pending\", knownterminalid}"))
+    XCTAssertTrue(normalizedSource.contains("terminalname starts with \"herdr\""))
+    XCTAssertTrue(normalizedSource.contains("terminalname is \"👻\""))
+    XCTAssertTrue(normalizedSource.contains("focus candidateterminal"))
     XCTAssertTrue(
       normalizedSource.contains(
-        "set environment variables of sessionconfiguration to {\"siglaunch_herdr_path=\(executablePath.lowercased())\"}"
+        "set command of sessionconfiguration to \"\(executablePath.lowercased())\""
       )
     )
     XCTAssertTrue(
+      normalizedSource.contains("set wait after command of sessionconfiguration to false")
+    )
+    XCTAssertTrue(
       normalizedSource.contains(
-        "set command of sessionconfiguration to \"exec \\\"$siglaunch_herdr_path\\\"\""
+        "new tab in front window with configuration sessionconfiguration"
       )
     )
-    XCTAssertTrue(normalizedSource.contains("return {\"pending\", createdterminalid}"))
     XCTAssertTrue(normalizedSource.contains("new window with configuration sessionconfiguration"))
+    XCTAssertTrue(normalizedSource.contains("return {\"pending\", createdterminalid}"))
     XCTAssertEqual(source.components(separatedBy: executablePath).count - 1, 1)
 
     let readinessSource = try XCTUnwrap(
@@ -38,10 +44,14 @@ final class GhosttyAppleScriptAdapterTests: XCTestCase {
         terminalID: "00000000-0000-0000-0000-000000000000"
       )
     ).lowercased()
-    XCTAssertTrue(readinessSource.contains("name of candidateterminal"))
+    XCTAssertTrue(readinessSource.contains("id of candidateterminal"))
     XCTAssertTrue(readinessSource.contains("return {\"ready\", expectedterminalid}"))
+    XCTAssertFalse(readinessSource.contains("name of candidateterminal"))
 
     let scripts = normalizedSource + readinessSource
+    XCTAssertFalse(scripts.contains("environment variables"))
+    XCTAssertFalse(scripts.contains("siglaunch_herdr_path"))
+    XCTAssertFalse(scripts.contains("exec"))
     XCTAssertFalse(scripts.contains("input text"))
     XCTAssertFalse(scripts.contains("send key"))
     XCTAssertFalse(scripts.contains("keystroke"))
