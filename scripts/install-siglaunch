@@ -1,0 +1,218 @@
+#!/bin/bash
+
+set -euo pipefail
+
+readonly TEAM_ID="S3YCJDN4GX"
+readonly DEFAULT_DESTINATION="/Applications/Siglaunch.app"
+readonly SCRIPT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+readonly REPOSITORY_ROOT="$(cd "$SCRIPT_DIRECTORY/.." && pwd)"
+readonly INFO_PLIST="$REPOSITORY_ROOT/Sources/SiglaunchApp/Info.plist"
+readonly SWIFT_BIN="${SIGLAUNCH_INSTALL_SWIFT_BIN:-/usr/bin/swift}"
+readonly SECURITY_BIN="${SIGLAUNCH_INSTALL_SECURITY_BIN:-/usr/bin/security}"
+readonly CODESIGN_BIN="${SIGLAUNCH_INSTALL_CODESIGN_BIN:-/usr/bin/codesign}"
+readonly PGREP_BIN="${SIGLAUNCH_INSTALL_PGREP_BIN:-/usr/bin/pgrep}"
+readonly MV_BIN="${SIGLAUNCH_INSTALL_MV_BIN:-/bin/mv}"
+
+destination="$DEFAULT_DESTINATION"
+staging_reservation=""
+staging=""
+backup=""
+
+usage() {
+  printf 'Usage: %s [--destination /path/to/Siglaunch.app]\n' "$0"
+}
+
+fail() {
+  printf 'install-siglaunch: %s\n' "$*" >&2
+  exit 1
+}
+
+path_exists() {
+  [[ -e "$1" || -L "$1" ]]
+}
+
+cleanup() {
+  local status=$?
+  trap - EXIT
+  trap '' HUP INT TERM
+
+  if [[ -n "$backup" ]] && path_exists "$backup" && ! path_exists "$destination"; then
+    if "$MV_BIN" "$backup" "$destination"; then
+      backup=""
+      printf 'install-siglaunch: restored the previous Siglaunch.app after activation failed.\n' >&2
+    else
+      printf 'install-siglaunch: could not restore backup at %s\n' "$backup" >&2
+    fi
+  fi
+
+  if [[ -n "$staging" ]] && path_exists "$staging"; then
+    /bin/rm -rf "$staging"
+  fi
+  if [[ -n "$staging_reservation" ]] && path_exists "$staging_reservation"; then
+    /bin/rm -rf "$staging_reservation"
+  fi
+
+  exit "$status"
+}
+
+trap cleanup EXIT
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+while [[ $# -gt 0 ]]; do
+  case "$1" in
+    --destination)
+      [[ $# -ge 2 ]] || fail "--destination requires a path."
+      destination="${2%/}"
+      shift 2
+      ;;
+    --help|-h)
+      usage
+      exit 0
+      ;;
+    *)
+      usage >&2
+      fail "unknown argument: $1"
+      ;;
+  esac
+done
+
+[[ "$destination" == /* ]] || fail "destination must be an absolute path."
+target_name="${destination##*/}"
+[[ "$target_name" == *.app ]] || fail "destination must end in .app."
+target_parent="${destination%/*}"
+[[ -n "$target_parent" ]] || target_parent="/"
+
+if ! "$SWIFT_BIN" build \
+  --package-path "$REPOSITORY_ROOT" \
+  --configuration release \
+  --product Siglaunch
+then
+  fail "release build failed."
+fi
+if ! release_bin_directory="$(
+  "$SWIFT_BIN" build \
+    --package-path "$REPOSITORY_ROOT" \
+    --configuration release \
+    --show-bin-path
+)"
+then
+  fail "could not locate the release build output."
+fi
+release_executable="$release_bin_directory/Siglaunch"
+[[ -f "$release_executable" ]] || fail "release build did not produce Siglaunch."
+
+if ! security_output="$("$SECURITY_BIN" find-identity -v -p codesigning)"; then
+  fail "could not query codesigning identities."
+fi
+identity_matches="$(
+  printf '%s\n' "$security_output" \
+    | /usr/bin/sed -nE \
+      's/^[[:space:]]*[0-9]+\)[[:space:]]+[[:xdigit:]]{40}[[:space:]]+"(Developer ID Application: [^"]+ \(S3YCJDN4GX\))"[[:space:]]*$/\1/p'
+)"
+identity=""
+identity_count=0
+while IFS= read -r candidate; do
+  [[ -n "$candidate" ]] || continue
+  identity="$candidate"
+  identity_count=$((identity_count + 1))
+done <<EOF_IDENTITIES
+$identity_matches
+EOF_IDENTITIES
+
+if [[ $identity_count -eq 0 ]]; then
+  fail "no valid Developer ID Application identity found for Team ID $TEAM_ID."
+fi
+if [[ $identity_count -ne 1 ]]; then
+  fail "found $identity_count valid Developer ID Application identities for Team ID $TEAM_ID; expected exactly one."
+fi
+
+[[ -d "$target_parent" ]] || fail "destination parent does not exist: $target_parent"
+[[ -w "$target_parent" ]] || fail "destination parent is not writable: $target_parent"
+if path_exists "$destination"; then
+  [[ ! -L "$destination" && -d "$destination" ]] \
+    || fail "existing destination must be a non-symlink App Bundle directory."
+fi
+
+set +e
+"$PGREP_BIN" -x Siglaunch >/dev/null 2>&1
+pgrep_status=$?
+set -e
+case "$pgrep_status" in
+  0)
+    fail "Siglaunch is running; choose Quit Siglaunch before installing."
+    ;;
+  1)
+    ;;
+  *)
+    fail "could not determine whether Siglaunch is running."
+    ;;
+esac
+
+staging_reservation="$(
+  /usr/bin/mktemp -d "$target_parent/.${target_name}.staging.XXXXXX"
+)"
+staging_candidate="${staging_reservation}.app"
+if path_exists "$staging_candidate"; then
+  fail "could not reserve a unique sibling staging App Bundle."
+fi
+trap '' HUP INT TERM
+if ! /bin/mv "$staging_reservation" "$staging_candidate"; then
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  fail "could not create the sibling staging App Bundle."
+fi
+staging="$staging_candidate"
+staging_reservation=""
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+/bin/mkdir -p "$staging/Contents/MacOS" "$staging/Contents/Resources"
+/bin/cp "$release_executable" "$staging/Contents/MacOS/Siglaunch"
+/bin/chmod 755 "$staging/Contents/MacOS/Siglaunch"
+/bin/cp "$INFO_PLIST" "$staging/Contents/Info.plist"
+/usr/bin/plutil -lint "$staging/Contents/Info.plist" >/dev/null
+
+if ! "$CODESIGN_BIN" \
+  --force \
+  --options runtime \
+  --sign "$identity" \
+  "$staging"
+then
+  fail "Developer ID signing failed."
+fi
+if ! "$CODESIGN_BIN" --verify --deep --strict --verbose=2 "$staging"; then
+  fail "strict signature verification failed."
+fi
+
+if path_exists "$destination"; then
+  backup="$(/usr/bin/mktemp -d "$target_parent/.${target_name}.backup.XXXXXX")"
+  /bin/rmdir "$backup"
+  if ! "$MV_BIN" "$destination" "$backup"; then
+    backup=""
+    fail "could not move the existing Siglaunch.app to a sibling backup."
+  fi
+fi
+
+trap '' HUP INT TERM
+if ! "$MV_BIN" "$staging" "$destination"; then
+  trap 'exit 129' HUP
+  trap 'exit 130' INT
+  trap 'exit 143' TERM
+  fail "could not activate the verified Siglaunch.app."
+fi
+staging=""
+
+if [[ -n "$backup" ]]; then
+  /bin/rm -rf "$backup"
+  backup=""
+fi
+trap 'exit 129' HUP
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+printf 'Installed Siglaunch at %s\n' "$destination"
+printf 'Open it from Applications, Launchpad, Spotlight, or with: open -a Siglaunch\n'

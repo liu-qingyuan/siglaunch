@@ -49,6 +49,55 @@ Run the test suite with:
 swift test
 ```
 
+## Local App installation
+
+Siglaunch requires exactly one valid `Developer ID Application` signing identity
+for Team ID `S3YCJDN4GX`. Confirm the identity is available before installing:
+
+```bash
+security find-identity -v -p codesigning
+```
+
+Quit any running copy with **Quit Siglaunch**, then build, sign, verify, and install
+the release App Bundle with:
+
+```bash
+./scripts/install-siglaunch
+```
+
+The default destination is `/Applications/Siglaunch.app`. The command stages and
+verifies the new bundle next to that destination before replacing an existing
+installation. Re-run the same command to update Siglaunch. A failed update restores
+the previous App; the command never falls back to ad-hoc signing, launches the App,
+or reads or changes files under `~/Library/Application Support/Siglaunch`.
+Automated tests use the same command with `--destination /temporary/Siglaunch.app`.
+
+Open the installed menu bar App from Applications, Launchpad, Spotlight, or:
+
+```bash
+open -a Siglaunch
+```
+
+Siglaunch remains outside the Dock and App Switcher. Choose **Quit Siglaunch** from
+its menu to release the camera and end the process. Open it from the same entry
+again to restart it; opening an already running App does not create another
+resident process.
+
+This local installation is not notarized and is not an external distribution
+workflow. Login Items, automatic launch at sign-in, installers, automatic updates,
+and a branded App icon are not supported.
+
+The real Developer ID, `/Applications`, launch, quit, and relaunch smoke is disabled
+by default. It replaces the live installation and can start camera access. Run it
+only after explicitly authorizing those effects with both variables:
+
+```bash
+SIGLAUNCH_RUN_INSTALL_SMOKE=1 \
+SIGLAUNCH_CONFIRM_APPLICATIONS_INSTALL='replace /Applications/Siglaunch.app' \
+swift test \
+  --filter InstallSiglaunchTests/testLiveApplicationsInstallLaunchQuitAndRelaunchWhenExplicitlyAuthorized
+```
+
 The live Ghostty AppleScript smoke is disabled by default because it focuses an
 existing Herdr terminal or starts `herdr` in a new Ghostty window. Run it only
 against disposable or intentionally prepared live state:
