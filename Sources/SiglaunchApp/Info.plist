@@ -24,6 +24,8 @@
   <string>13.0</string>
   <key>LSUIElement</key>
   <true/>
+  <key>NSAppleEventsUsageDescription</key>
+  <string>Siglaunch uses Apple Events to focus or launch the configured Ghostty workflow.</string>
   <key>NSCameraUsageDescription</key>
   <string>Siglaunch uses the MacBook built-in camera for Gesture Monitoring.</string>
 </dict>

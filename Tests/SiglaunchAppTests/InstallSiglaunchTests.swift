@@ -40,6 +40,7 @@ final class InstallSiglaunchTests: XCTestCase {
     XCTAssertEqual(metadata["LSMinimumSystemVersion"] as? String, "13.0")
     XCTAssertEqual(metadata["LSUIElement"] as? Bool, true)
     XCTAssertNotNil(metadata["NSCameraUsageDescription"] as? String)
+    XCTAssertNotNil(metadata["NSAppleEventsUsageDescription"] as? String)
 
     let toolLog = try fixture.toolLog()
     XCTAssertTrue(toolLog.contains("swift build --package-path"), toolLog)
@@ -57,6 +58,45 @@ final class InstallSiglaunchTests: XCTestCase {
       toolLog.split(separator: "\n").first { $0.hasPrefix("codesign --force") }
     )
     XCTAssertTrue(signingLine.hasSuffix(".app"), String(signingLine))
+  }
+
+  func testSignsHardenedRuntimeWithCameraAndAutomationEntitlements() throws {
+    let fixture = try InstallFixture(testCase: self)
+
+    let result = try fixture.runInstaller()
+
+    XCTAssertEqual(result.status, 0, result.standardError)
+    let signingLine = try XCTUnwrap(
+      try fixture.toolLog().split(separator: "\n").first {
+        $0.hasPrefix("codesign --force")
+      }
+    )
+    let arguments = signingLine.split(separator: " ")
+    let entitlementsFlag = try XCTUnwrap(
+      arguments.firstIndex(of: "--entitlements"),
+      "Hardened-runtime signing must include an entitlements file."
+    )
+    let entitlementsPathIndex = arguments.index(after: entitlementsFlag)
+    XCTAssertLessThan(entitlementsPathIndex, arguments.endIndex)
+    guard entitlementsPathIndex < arguments.endIndex else { return }
+
+    let entitlementsData = try Data(
+      contentsOf: URL(fileURLWithPath: String(arguments[entitlementsPathIndex]))
+    )
+    let entitlements = try XCTUnwrap(
+      PropertyListSerialization.propertyList(
+        from: entitlementsData,
+        format: nil
+      ) as? [String: Any]
+    )
+    XCTAssertEqual(
+      entitlements["com.apple.security.device.camera"] as? Bool,
+      true
+    )
+    XCTAssertEqual(
+      entitlements["com.apple.security.automation.apple-events"] as? Bool,
+      true
+    )
   }
 
   func testBuildAndRunningProcessPreflightPreserveExistingApp() throws {

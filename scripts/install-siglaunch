@@ -7,6 +7,7 @@ readonly DEFAULT_DESTINATION="/Applications/Siglaunch.app"
 readonly SCRIPT_DIRECTORY="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly REPOSITORY_ROOT="$(cd "$SCRIPT_DIRECTORY/.." && pwd)"
 readonly INFO_PLIST="$REPOSITORY_ROOT/Sources/SiglaunchApp/Info.plist"
+readonly ENTITLEMENTS="$REPOSITORY_ROOT/Configuration/Siglaunch.entitlements"
 readonly SWIFT_BIN="${SIGLAUNCH_INSTALL_SWIFT_BIN:-/usr/bin/swift}"
 readonly SECURITY_BIN="${SIGLAUNCH_INSTALL_SECURITY_BIN:-/usr/bin/security}"
 readonly CODESIGN_BIN="${SIGLAUNCH_INSTALL_CODESIGN_BIN:-/usr/bin/codesign}"
@@ -175,11 +176,13 @@ trap 'exit 143' TERM
 /bin/chmod 755 "$staging/Contents/MacOS/Siglaunch"
 /bin/cp "$INFO_PLIST" "$staging/Contents/Info.plist"
 /usr/bin/plutil -lint "$staging/Contents/Info.plist" >/dev/null
+/usr/bin/plutil -lint "$ENTITLEMENTS" >/dev/null
 
 if ! "$CODESIGN_BIN" \
   --force \
   --options runtime \
   --sign "$identity" \
+  --entitlements "$ENTITLEMENTS" \
   "$staging"
 then
   fail "Developer ID signing failed."
