@@ -108,7 +108,7 @@ final class CreateMLRecognizerTrainingAdapter: RecognizerTrainingAdapting {
     let parameters = MLImageClassifier.ModelParameters(
       validation: .dataSource(.filesByLabel(Self.filesByLabel(split.validation))),
       maxIterations: 25,
-      augmentation: [],
+      augmentation: [.rotation, .exposure],
       algorithm: .transferLearning(
         featureExtractor: .scenePrint(revision: 1),
         classifier: .logisticRegressor

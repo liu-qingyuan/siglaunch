@@ -38,6 +38,33 @@ final class RecognizerTrainingAdapterTests: XCTestCase {
   }
 
   @MainActor
+  func testTrainingUsesGeneralizationAugmentationsWithoutChangingHandedness() throws {
+    let workspace = try CreateMLTestWorkspace()
+    let input = try workspace.makeTrainingInput(samplesPerLabel: 10)
+    let resultSubject = PassthroughSubject<TrainedRecognizerModel, any Error>()
+    var observedAugmentation: MLImageClassifier.ImageAugmentationOptions?
+    let trainer = CreateMLRecognizerTrainingAdapter(
+      outputDirectory: workspace.artifactsDirectory,
+      startJob: { _, parameters in
+        observedAugmentation = parameters.augmentationOptions
+        return RecognizerTrainingJobHandle(
+          progress: Progress(totalUnitCount: 10),
+          result: resultSubject.eraseToAnyPublisher(),
+          cancel: {}
+        )
+      }
+    )
+
+    trainer.start(with: input, progress: { _ in }, completion: { _ in })
+
+    XCTAssertEqual(observedAugmentation, [.rotation, .exposure])
+    XCTAssertFalse(observedAugmentation?.contains(.crop) ?? true)
+    XCTAssertFalse(observedAugmentation?.contains(.flip) ?? true)
+    XCTAssertFalse(observedAugmentation?.contains(.blur) ?? true)
+    XCTAssertFalse(observedAugmentation?.contains(.noise) ?? true)
+  }
+
+  @MainActor
   func testCancellationCompletesFromJobTerminalAndIgnoresLaterProgress() async throws {
     let workspace = try CreateMLTestWorkspace()
     let input = try workspace.makeTrainingInput(samplesPerLabel: 10)
