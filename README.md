@@ -27,17 +27,30 @@ absolute path from Siglaunch's `PATH`, `~/.local/bin`, `/opt/homebrew/bin`, or
 `/usr/local/bin`; Ghostty receives that path separately from its fixed surface
 command.
 
-After the default Herdr Session is ready, Siglaunch runs `herdr agent list`,
-keeps the original JSON order, and selects the first `pi` Agent whose canonical
-`cwd` or `foreground_cwd` matches the configured Workspace. It focuses that
-Leading Pi Agent through `herdr agent focus <pane_id>`; Siglaunch never manages
-the Agent process directly. When no Agent matches, Siglaunch selects Herdr's
-versioned cold-start contract. Herdr 0.7.4 receives the Workspace and exact argv
-through `agent start --cwd`; Herdr 0.7.5 and newer creates the Workspace and
-starts canonical `pi` in its root pane with the configured arguments. Both paths
-require Herdr to confirm the same complete argv. Siglaunch never joins that argv
-into a shell command or starts Pi itself. On Herdr 0.7.5 and newer,
-`pi.command[0]` must be `pi` because Herdr owns canonical executable selection.
+The Primary Workflow first runs the read-only `herdr agent list`, before loading
+configuration or touching Ghostty. A fully decoded snapshot containing any record
+whose `agent` is exactly `pi` completes with Pi Agent Preserved. Workspace,
+`cwd`, `foreground_cwd`, return order, pane, and focused state do not affect this
+check. This branch does not load configuration, resolve or activate Ghostty,
+ensure a Herdr GUI Session, focus an Agent, or start a process.
+
+An empty or non-Pi snapshot, or an initially unavailable Herdr, enters cold start.
+Malformed initial output fails before configuration or terminal side effects. Cold
+start loads and validates the configuration, resolves or launches supported
+Ghostty, and ensures its process-validated managed Herdr Session. Siglaunch then
+queries Agents again. A Pi Agent that appeared is preserved; a fully decoded
+snapshot still containing no Pi starts the configured Pi through Herdr. An
+unavailable or malformed post-bootstrap query fails without starting Pi.
+
+The second snapshot prevents a duplicate start only for a Pi Agent already visible
+in that snapshot. A TOCTOU race remains between the query and start; Siglaunch does
+not add a lock, reservation, or atomic find-or-start contract. Herdr 0.7.4 receives
+the Workspace and exact argv through `agent start --cwd`; Herdr 0.7.5 and newer
+creates the Workspace and starts canonical `pi` in its root pane with the
+configured arguments. Both paths require Herdr to confirm the same complete argv.
+Siglaunch never joins that argv into a shell command or starts Pi itself. On Herdr
+0.7.5 and newer, `pi.command[0]` must be `pi` because Herdr owns canonical
+executable selection.
 
 ```bash
 swift run Siglaunch
@@ -107,15 +120,15 @@ SIGLAUNCH_RUN_GHOSTTY_SMOKE=1 swift test \
   --filter GhosttyAppleScriptAdapterTests/testLiveGhosttyEnsuresDefaultHerdrSessionWhenOptedIn
 ```
 
-The live Herdr focus smoke is also disabled by default. It requires a running
-Herdr server, a connected GUI client, and an existing Pi Agent in the selected
-Workspace. It changes live Herdr focus:
+The live Herdr query smoke is also disabled by default. It requires a running
+Herdr server, performs only two Agent-list queries, compares the decoded snapshots,
+and verifies that the frontmost application is unchanged. Herdr does not expose a
+supported read-only focus probe here, so the smoke does not claim to observe Herdr
+focus:
 
 ```bash
-SIGLAUNCH_RUN_HERDR_FOCUS_SMOKE=1 \
-SIGLAUNCH_HERDR_FOCUS_WORKSPACE="$PWD" \
-swift test \
-  --filter HerdrAgentAdapterTests/testLiveHerdrFocusesWorkspaceLeadingPiAgentWhenOptedIn
+SIGLAUNCH_RUN_HERDR_QUERY_SMOKE=1 swift test \
+  --filter HerdrAgentAdapterTests/testLiveHerdrQueryPreservesFrontmostApplicationAndStableSnapshotWhenOptedIn
 ```
 
 The live Herdr cold-start smoke is disabled by default. It creates a real Pi

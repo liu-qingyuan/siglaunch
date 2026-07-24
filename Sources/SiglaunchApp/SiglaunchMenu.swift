@@ -293,9 +293,9 @@ extension RecognizerTrainingFailure {
 extension PrimaryWorkflowPresentation {
   var content: MenuStatusContent {
     switch self {
-    case .leadingPiAgentFocused:
+    case .piAgentPreserved:
       MenuStatusContent(
-        title: "Leading Pi Agent Focused",
+        title: "Pi Agent Preserved",
         symbolName: "terminal.fill",
         detail: nil
       )

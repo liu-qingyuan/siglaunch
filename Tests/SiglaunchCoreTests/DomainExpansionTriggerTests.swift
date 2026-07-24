@@ -31,7 +31,7 @@ final class DomainExpansionTriggerTests: XCTestCase {
           [
             .presentDomainExpansionCandidateProgress(nil),
             .presentDomainExpansionHUD(.showDomainExpansion),
-            .loadWorkflowConfiguration,
+            .queryHerdrAgents(attemptID: 1, phase: .initial),
           ]
         ),
       ]
@@ -261,7 +261,13 @@ final class DomainExpansionTriggerTests: XCTestCase {
     let coordinator = makeActiveMonitoringCoordinator(clock: clock)
 
     let firstTrigger = trigger(with: coordinator)
-    XCTAssertEqual(firstTrigger.filter { $0 == .loadWorkflowConfiguration }.count, 1)
+    XCTAssertEqual(
+      firstTrigger.filter { $0 == .queryHerdrAgents(attemptID: 1, phase: .initial) }.count,
+      1
+    )
+    _ = coordinator.handle(
+      .herdrAgentQueryCompleted(attemptID: 1, phase: .initial, result: .agents([]))
+    )
     XCTAssertEqual(
       coordinator.handle(
         .workflowConfigurationLoadCompleted(.failed(.unavailable))
@@ -304,7 +310,7 @@ final class DomainExpansionTriggerTests: XCTestCase {
       [
         .presentDomainExpansionCandidateProgress(nil),
         .presentDomainExpansionHUD(.showDomainExpansion),
-        .loadWorkflowConfiguration,
+        .queryHerdrAgents(attemptID: 2, phase: .initial),
       ]
     )
   }
@@ -313,6 +319,9 @@ final class DomainExpansionTriggerTests: XCTestCase {
     let clock = TestClock(now: 100)
     let coordinator = makeActiveMonitoringCoordinator(clock: clock)
     _ = trigger(with: coordinator)
+    _ = coordinator.handle(
+      .herdrAgentQueryCompleted(attemptID: 1, phase: .initial, result: .agents([]))
+    )
     _ = coordinator.handle(
       .workflowConfigurationLoadCompleted(.failed(.unavailable))
     )
@@ -364,6 +373,9 @@ final class DomainExpansionTriggerTests: XCTestCase {
     let clock = TestClock(now: 100)
     let coordinator = makeActiveMonitoringCoordinator(clock: clock)
     _ = trigger(with: coordinator)
+    _ = coordinator.handle(
+      .herdrAgentQueryCompleted(attemptID: 1, phase: .initial, result: .agents([]))
+    )
     _ = coordinator.handle(
       .workflowConfigurationLoadCompleted(.failed(.unavailable))
     )
@@ -481,7 +493,7 @@ final class DomainExpansionTriggerTests: XCTestCase {
       switch effect {
       case .presentDomainExpansionCandidateProgress,
         .presentDomainExpansionHUD,
-        .loadWorkflowConfiguration:
+        .queryHerdrAgents:
         true
       default:
         false

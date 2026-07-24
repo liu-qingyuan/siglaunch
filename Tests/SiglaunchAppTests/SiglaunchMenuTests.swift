@@ -117,7 +117,11 @@ final class SiglaunchMenuTests: XCTestCase {
     XCTAssertFalse(RecognizerTrainingPresentation.succeeded.isInProgress)
   }
 
-  func testPiStartPresentationsRemainStepSpecific() {
+  func testPrimaryWorkflowPresentationsRemainOutcomeSpecific() {
+    let preserved = PrimaryWorkflowPresentation.piAgentPreserved.content
+    XCTAssertEqual(preserved.title, "Pi Agent Preserved")
+    XCTAssertNil(preserved.detail)
+
     let success = PrimaryWorkflowPresentation.piAgentStarted.content
     XCTAssertEqual(success.title, "Pi Agent Started")
     XCTAssertNil(success.detail)

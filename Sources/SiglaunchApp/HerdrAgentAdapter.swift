@@ -47,10 +47,6 @@ protocol HerdrAgentAdapting: AnyObject {
   func queryAgents(
     completion: @escaping @MainActor @Sendable (HerdrAgentQueryResult) -> Void
   )
-  func focusAgent(
-    paneID: String,
-    completion: @escaping @MainActor @Sendable (HerdrAgentFocusResult) -> Void
-  )
   func startPiAgent(
     workspacePath: String,
     command: [String],
@@ -243,25 +239,6 @@ final class HerdrAgentAdapter: HerdrAgentAdapting {
     Task {
       let execution = await commandRunner.run(command)
       completion(Self.queryResult(from: execution))
-    }
-  }
-
-  func focusAgent(
-    paneID: String,
-    completion: @escaping @MainActor @Sendable (HerdrAgentFocusResult) -> Void
-  ) {
-    guard let executablePath = executablePathProvider() else {
-      completion(.failed)
-      return
-    }
-
-    let command = HerdrCommand(
-      executablePath: executablePath,
-      arguments: ["agent", "focus", paneID]
-    )
-    Task {
-      let execution = await commandRunner.run(command)
-      completion(execution?.terminationStatus == 0 ? .succeeded : .failed)
     }
   }
 

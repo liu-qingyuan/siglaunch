@@ -13,7 +13,7 @@ struct SystemRecognitionClock: RecognitionClockReading {
 }
 
 enum PrimaryWorkflowPresentation: Equatable {
-  case leadingPiAgentFocused
+  case piAgentPreserved
   case piAgentStarted
   case failed(PrimaryWorkflowFailure)
 }
@@ -159,13 +159,15 @@ final class ProductionEffectAdapter {
       ghosttyPlatformAdapter.ensureDefaultHerdrSession { [weak self] result in
         self?.eventSink(.defaultHerdrSessionEnsureCompleted(result))
       }
-    case .queryHerdrAgents:
+    case .queryHerdrAgents(let attemptID, let phase):
       herdrAgentAdapter.queryAgents { [weak self] result in
-        self?.eventSink(.herdrAgentQueryCompleted(result))
-      }
-    case .focusHerdrAgent(let paneID):
-      herdrAgentAdapter.focusAgent(paneID: paneID) { [weak self] result in
-        self?.eventSink(.herdrAgentFocusCompleted(result))
+        self?.eventSink(
+          .herdrAgentQueryCompleted(
+            attemptID: attemptID,
+            phase: phase,
+            result: result
+          )
+        )
       }
     case .startPiAgent(let workspacePath, let command):
       herdrAgentAdapter.startPiAgent(
@@ -174,8 +176,8 @@ final class ProductionEffectAdapter {
       ) { [weak self] result in
         self?.eventSink(.herdrAgentStartCompleted(result))
       }
-    case .primaryWorkflowLeadingPiAgentFocused:
-      workflowSink(.leadingPiAgentFocused)
+    case .primaryWorkflowPiAgentPreserved:
+      workflowSink(.piAgentPreserved)
     case .primaryWorkflowPiAgentStarted:
       workflowSink(.piAgentStarted)
     case .primaryWorkflowFailed(let failure):

@@ -88,6 +88,6 @@ _Avoid_: Terminal Session, Pi Session
 在 Herdr Session 内启动或恢复的个人编码 Agent 进程。
 _Avoid_: Assistant, Bot
 
-**Leading Pi Agent**:
-符合目标 Agent 类型与 Workspace 路径后，在 Herdr 返回顺序中排第一的 Pi Agent。
-_Avoid_: Most Recent Agent, Focused Agent
+**Existing Pi Agent**:
+Herdr Agent snapshot 中任意 `agent == "pi"` 的 record；Workspace、目录、pane、顺序和 focused 状态均不参与存在性判断。保留 Existing Pi Agent 时不改变前台应用、Ghostty 或 Herdr focus，也不启动进程。
+_Avoid_: Leading Pi Agent, Matching Pi Agent, Focused Agent

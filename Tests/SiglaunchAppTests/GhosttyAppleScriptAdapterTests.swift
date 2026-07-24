@@ -286,6 +286,7 @@ final class GhosttyAppleScriptAdapterTests: XCTestCase {
       ),
       .menuPresented(.activeMonitoring),
       .primaryWorkflowRequested,
+      .herdrAgentQueryCompleted(attemptID: 1, phase: .initial, result: .agents([])),
       .workflowConfigurationLoadCompleted(
         .loaded(
           WorkflowConfiguration(

@@ -373,9 +373,11 @@ public enum HerdrAgentQueryResult: Equatable, Sendable {
   case malformedOutput
 }
 
-public enum HerdrAgentFocusResult: Equatable, Sendable {
-  case succeeded
-  case failed
+public typealias PrimaryWorkflowAttemptID = UInt64
+
+public enum HerdrAgentQueryPhase: Equatable, Sendable {
+  case initial
+  case postBootstrap
 }
 
 public enum HerdrAgentStartResult: Equatable, Sendable {
@@ -423,16 +425,6 @@ public struct PrimaryWorkflowContext: Equatable, Sendable {
   }
 }
 
-public struct LeadingPiAgentContext: Equatable, Sendable {
-  public let workflow: PrimaryWorkflowContext
-  public let agent: HerdrAgent
-
-  public init(workflow: PrimaryWorkflowContext, agent: HerdrAgent) {
-    self.workflow = workflow
-    self.agent = agent
-  }
-}
-
 public enum AppEvent: Equatable, Sendable {
   case appLaunched
   case menuBarApplicationConfigurationCompleted(MenuBarApplicationConfigurationResult)
@@ -453,8 +445,11 @@ public enum AppEvent: Equatable, Sendable {
   case ghosttyResolutionCompleted(GhosttyResolutionResult)
   case ghosttyLaunchCompleted(GhosttyLaunchResult)
   case defaultHerdrSessionEnsureCompleted(DefaultHerdrSessionEnsureResult)
-  case herdrAgentQueryCompleted(HerdrAgentQueryResult)
-  case herdrAgentFocusCompleted(HerdrAgentFocusResult)
+  case herdrAgentQueryCompleted(
+    attemptID: PrimaryWorkflowAttemptID,
+    phase: HerdrAgentQueryPhase,
+    result: HerdrAgentQueryResult
+  )
   case herdrAgentStartCompleted(HerdrAgentStartResult)
   case poseDatasetImportRequested
   case poseDatasetFolderSelectionCompleted(PoseDatasetFolderSelectionResult)
@@ -494,10 +489,12 @@ public enum AppEffect: Equatable, Sendable {
   case resolveGhostty
   case launchGhostty(at: String)
   case ensureDefaultHerdrSession
-  case queryHerdrAgents
-  case focusHerdrAgent(paneID: String)
+  case queryHerdrAgents(
+    attemptID: PrimaryWorkflowAttemptID,
+    phase: HerdrAgentQueryPhase
+  )
   case startPiAgent(workspacePath: String, command: [String])
-  case primaryWorkflowLeadingPiAgentFocused(LeadingPiAgentContext)
+  case primaryWorkflowPiAgentPreserved
   case primaryWorkflowPiAgentStarted(PrimaryWorkflowContext)
   case primaryWorkflowFailed(PrimaryWorkflowFailure)
   case presentPoseDatasetImport(PoseDatasetImportPresentation?)
@@ -590,13 +587,13 @@ public final class LaunchCoordinator {
 
   private enum PrimaryWorkflowState {
     case idle
-    case loadingConfiguration
-    case resolvingGhostty(WorkflowConfiguration)
-    case launchingGhostty(WorkflowConfiguration)
-    case ensuringDefaultHerdrSession(WorkflowConfiguration)
-    case queryingHerdrAgents(PrimaryWorkflowContext)
-    case focusingHerdrAgent(PrimaryWorkflowContext, HerdrAgent)
-    case startingPiAgent(PrimaryWorkflowContext)
+    case checkingForPiAgent(PrimaryWorkflowAttemptID)
+    case loadingConfiguration(PrimaryWorkflowAttemptID)
+    case resolvingGhostty(PrimaryWorkflowAttemptID, WorkflowConfiguration)
+    case launchingGhostty(PrimaryWorkflowAttemptID, WorkflowConfiguration)
+    case ensuringDefaultHerdrSession(PrimaryWorkflowAttemptID, WorkflowConfiguration)
+    case recheckingForPiAgent(PrimaryWorkflowAttemptID, PrimaryWorkflowContext)
+    case startingPiAgent(PrimaryWorkflowAttemptID, PrimaryWorkflowContext)
   }
 
   private enum DomainExpansionTriggerState {
@@ -618,6 +615,7 @@ public final class LaunchCoordinator {
 
   private var state: State = .awaitingLaunch
   private var primaryWorkflowState: PrimaryWorkflowState = .idle
+  private var primaryWorkflowAttemptSequence: PrimaryWorkflowAttemptID = 0
   private var domainExpansionHUDState: DomainExpansionHUDState = .idle
   private var monitoringPoseDatasetState: MonitoringPoseDatasetState = .idle
   private var validatedTrainingInput: PoseDatasetTrainingInput?
@@ -1763,8 +1761,10 @@ public final class LaunchCoordinator {
 
   private func startPrimaryWorkflow() -> Effects {
     guard canStartPrimaryWorkflow else { return [] }
-    primaryWorkflowState = .loadingConfiguration
-    return [.loadWorkflowConfiguration]
+    primaryWorkflowAttemptSequence &+= 1
+    let attemptID = primaryWorkflowAttemptSequence
+    primaryWorkflowState = .checkingForPiAgent(attemptID)
+    return [.queryHerdrAgents(attemptID: attemptID, phase: .initial)]
   }
 
   private func handleDomainExpansionHUD(_ event: AppEvent) -> Effects? {
@@ -1827,10 +1827,47 @@ public final class LaunchCoordinator {
       return startPrimaryWorkflow()
 
     case (
-      .loadingConfiguration,
+      .checkingForPiAgent(let activeAttemptID),
+      .herdrAgentQueryCompleted(
+        attemptID: let completionAttemptID,
+        phase: .initial,
+        result: .agents(let agents)
+      )
+    ) where activeAttemptID == completionAttemptID:
+      if Self.containsPiAgent(in: agents) {
+        primaryWorkflowState = .idle
+        return [.primaryWorkflowPiAgentPreserved]
+          + recordDomainExpansionHUDOutcome(.succeeded)
+      }
+      primaryWorkflowState = .loadingConfiguration(activeAttemptID)
+      return [.loadWorkflowConfiguration]
+
+    case (
+      .checkingForPiAgent(let activeAttemptID),
+      .herdrAgentQueryCompleted(
+        attemptID: let completionAttemptID,
+        phase: .initial,
+        result: .herdrUnavailable
+      )
+    ) where activeAttemptID == completionAttemptID:
+      primaryWorkflowState = .loadingConfiguration(activeAttemptID)
+      return [.loadWorkflowConfiguration]
+
+    case (
+      .checkingForPiAgent(let activeAttemptID),
+      .herdrAgentQueryCompleted(
+        attemptID: let completionAttemptID,
+        phase: .initial,
+        result: .malformedOutput
+      )
+    ) where activeAttemptID == completionAttemptID:
+      return failPrimaryWorkflow(.malformedHerdrOutput)
+
+    case (
+      .loadingConfiguration(let attemptID),
       .workflowConfigurationLoadCompleted(.loaded(let configuration))
     ):
-      primaryWorkflowState = .resolvingGhostty(configuration)
+      primaryWorkflowState = .resolvingGhostty(attemptID, configuration)
       return [.resolveGhostty]
 
     case (
@@ -1840,7 +1877,7 @@ public final class LaunchCoordinator {
       return failPrimaryWorkflow(.configuration(failure))
 
     case (
-      .resolvingGhostty(let configuration),
+      .resolvingGhostty(let attemptID, let configuration),
       .ghosttyResolutionCompleted(.found(let ghostty))
     ):
       if let versionFailure = GhosttyVersionPolicy.failure(for: ghostty.version) {
@@ -1848,64 +1885,84 @@ public final class LaunchCoordinator {
       }
 
       if ghostty.isRunning {
-        primaryWorkflowState = .ensuringDefaultHerdrSession(configuration)
+        primaryWorkflowState = .ensuringDefaultHerdrSession(attemptID, configuration)
         return [.ensureDefaultHerdrSession]
       }
 
-      primaryWorkflowState = .launchingGhostty(configuration)
+      primaryWorkflowState = .launchingGhostty(attemptID, configuration)
       return [.launchGhostty(at: ghostty.path)]
 
     case (.resolvingGhostty, .ghosttyResolutionCompleted(.notInstalled)):
       return failPrimaryWorkflow(.ghosttyNotInstalled)
 
-    case (.launchingGhostty(let configuration), .ghosttyLaunchCompleted(.succeeded)):
-      primaryWorkflowState = .ensuringDefaultHerdrSession(configuration)
+    case (
+      .launchingGhostty(let attemptID, let configuration),
+      .ghosttyLaunchCompleted(.succeeded)
+    ):
+      primaryWorkflowState = .ensuringDefaultHerdrSession(attemptID, configuration)
       return [.ensureDefaultHerdrSession]
 
     case (.launchingGhostty, .ghosttyLaunchCompleted(.failed)):
       return failPrimaryWorkflow(.ghosttyLaunchFailed)
 
     case (
-      .ensuringDefaultHerdrSession(let configuration),
+      .ensuringDefaultHerdrSession(let attemptID, let configuration),
       .defaultHerdrSessionEnsureCompleted(.ready(let session))
     ):
-      primaryWorkflowState = .queryingHerdrAgents(
+      primaryWorkflowState = .recheckingForPiAgent(
+        attemptID,
         PrimaryWorkflowContext(
           configuration: configuration,
           defaultHerdrSession: session
         )
       )
-      return [.queryHerdrAgents]
+      return [
+        .queryHerdrAgents(attemptID: attemptID, phase: .postBootstrap)
+      ]
 
     case (
-      .queryingHerdrAgents(let context),
-      .herdrAgentQueryCompleted(.agents(let agents))
-    ):
-      guard
-        let agent = Self.leadingPiAgent(
-          in: agents,
-          workspacePath: context.configuration.workspacePath
-        )
-      else {
-        primaryWorkflowState = .startingPiAgent(context)
-        return [
-          .startPiAgent(
-            workspacePath: context.configuration.workspacePath,
-            command: context.configuration.piCommand
-          )
-        ]
+      .recheckingForPiAgent(let activeAttemptID, let context),
+      .herdrAgentQueryCompleted(
+        attemptID: let completionAttemptID,
+        phase: .postBootstrap,
+        result: .agents(let agents)
+      )
+    ) where activeAttemptID == completionAttemptID:
+      if Self.containsPiAgent(in: agents) {
+        primaryWorkflowState = .idle
+        return [.primaryWorkflowPiAgentPreserved]
+          + recordDomainExpansionHUDOutcome(.succeeded)
       }
-      primaryWorkflowState = .focusingHerdrAgent(context, agent)
-      return [.focusHerdrAgent(paneID: agent.paneID)]
+      primaryWorkflowState = .startingPiAgent(activeAttemptID, context)
+      return [
+        .startPiAgent(
+          workspacePath: context.configuration.workspacePath,
+          command: context.configuration.piCommand
+        )
+      ]
 
-    case (.queryingHerdrAgents, .herdrAgentQueryCompleted(.herdrUnavailable)):
+    case (
+      .recheckingForPiAgent(let activeAttemptID, _),
+      .herdrAgentQueryCompleted(
+        attemptID: let completionAttemptID,
+        phase: .postBootstrap,
+        result: .herdrUnavailable
+      )
+    ) where activeAttemptID == completionAttemptID:
       return failPrimaryWorkflow(.herdrUnavailable)
 
-    case (.queryingHerdrAgents, .herdrAgentQueryCompleted(.malformedOutput)):
+    case (
+      .recheckingForPiAgent(let activeAttemptID, _),
+      .herdrAgentQueryCompleted(
+        attemptID: let completionAttemptID,
+        phase: .postBootstrap,
+        result: .malformedOutput
+      )
+    ) where activeAttemptID == completionAttemptID:
       return failPrimaryWorkflow(.malformedHerdrOutput)
 
     case (
-      .startingPiAgent(let context),
+      .startingPiAgent(_, let context),
       .herdrAgentStartCompleted(.succeeded)
     ):
       primaryWorkflowState = .idle
@@ -1914,20 +1971,6 @@ public final class LaunchCoordinator {
 
     case (.startingPiAgent, .herdrAgentStartCompleted(.failed)):
       return failPrimaryWorkflow(.piStartFailed)
-
-    case (
-      .focusingHerdrAgent(let context, let agent),
-      .herdrAgentFocusCompleted(.succeeded)
-    ):
-      primaryWorkflowState = .idle
-      return [
-        .primaryWorkflowLeadingPiAgentFocused(
-          LeadingPiAgentContext(workflow: context, agent: agent)
-        )
-      ] + recordDomainExpansionHUDOutcome(.succeeded)
-
-    case (.focusingHerdrAgent, .herdrAgentFocusCompleted(.failed)):
-      return failPrimaryWorkflow(.herdrUnavailable)
 
     case (
       .ensuringDefaultHerdrSession,
@@ -1948,24 +1991,7 @@ public final class LaunchCoordinator {
     }
   }
 
-  private static func leadingPiAgent(
-    in agents: [HerdrAgent],
-    workspacePath: String
-  ) -> HerdrAgent? {
-    let workspacePath = canonicalPath(workspacePath)
-    return agents.first { agent in
-      guard agent.agent == "pi" else { return false }
-      return [agent.cwd, agent.foregroundCwd]
-        .compactMap { $0 }
-        .contains { canonicalPath($0) == workspacePath }
-    }
-  }
-
-  private static func canonicalPath(_ path: String) -> String {
-    let expandedPath = (path as NSString).expandingTildeInPath
-    return URL(fileURLWithPath: expandedPath)
-      .standardizedFileURL
-      .resolvingSymlinksInPath()
-      .path
+  private static func containsPiAgent(in agents: [HerdrAgent]) -> Bool {
+    agents.contains { $0.agent == "pi" }
   }
 }

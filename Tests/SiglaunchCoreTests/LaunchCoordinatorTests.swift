@@ -1055,7 +1055,7 @@ final class LaunchCoordinatorTests: XCTestCase {
     }
   }
 
-  func testPrimaryWorkflowColdStartPreparesGhosttyAndQueriesAgents() {
+  func testPrimaryWorkflowQueriesHerdrBeforeColdStartEffects() {
     let coordinator = makeWorkflowReadyCoordinator()
     let configuration = WorkflowConfiguration(
       workspacePath: "/Users/developer/work/siglaunch",
@@ -1068,8 +1068,13 @@ final class LaunchCoordinatorTests: XCTestCase {
     )
     let steps: [Step] = [
       (
-        "a Primary Workflow request loads its strict local configuration",
+        "a Primary Workflow request first queries Herdr Agents",
         .primaryWorkflowRequested,
+        [.queryHerdrAgents(attemptID: 1, phase: .initial)]
+      ),
+      (
+        "an initial empty snapshot loads the strict local configuration",
+        .herdrAgentQueryCompleted(attemptID: 1, phase: .initial, result: .agents([])),
         [.loadWorkflowConfiguration]
       ),
       (
@@ -1088,109 +1093,177 @@ final class LaunchCoordinatorTests: XCTestCase {
         [.ensureDefaultHerdrSession]
       ),
       (
-        "starting the default Herdr Session queries its Agents",
+        "starting the default Herdr Session rechecks its Agents",
         .defaultHerdrSessionEnsureCompleted(.ready(.started)),
-        [.queryHerdrAgents]
+        [.queryHerdrAgents(attemptID: 1, phase: .postBootstrap)]
       ),
     ]
 
     assertEffects(steps, from: coordinator)
   }
 
-  func testHerdrQuerySelectsLeadingPiAgentUsingCanonicalWorkspacePaths() {
-    let cases: [(name: String, agents: [HerdrAgent], paneID: String)] = [
-      (
-        "agent type is filtered before cwd matching",
-        [
-          HerdrAgent(
-            paneID: "pane-codex",
-            agent: "codex",
-            cwd: workflowConfiguration.workspacePath,
-            foregroundCwd: workflowConfiguration.workspacePath
-          ),
-          HerdrAgent(
-            paneID: "pane-leading-pi",
-            agent: "pi",
-            cwd: workflowConfiguration.workspacePath,
-            foregroundCwd: "/Users/developer"
-          ),
-        ],
-        "pane-leading-pi"
+  func testInitialMalformedHerdrOutputFailsBeforeColdStart() {
+    let coordinator = makeWorkflowReadyCoordinator()
+    XCTAssertEqual(
+      coordinator.handle(.primaryWorkflowRequested),
+      [.queryHerdrAgents(attemptID: 1, phase: .initial)]
+    )
+    XCTAssertEqual(
+      coordinator.handle(
+        .herdrAgentQueryCompleted(attemptID: 1, phase: .initial, result: .malformedOutput)
       ),
-      (
-        "cwd uses the same canonical path rule as Workspace",
-        [
-          HerdrAgent(
-            paneID: "pane-canonical-cwd",
-            agent: "pi",
-            cwd: "/Users/developer/work/other/../siglaunch/",
-            foregroundCwd: nil
-          )
-        ],
-        "pane-canonical-cwd"
+      [.primaryWorkflowFailed(.malformedHerdrOutput)]
+    )
+    XCTAssertEqual(
+      coordinator.handle(.workflowConfigurationLoadCompleted(.loaded(workflowConfiguration))),
+      []
+    )
+    XCTAssertEqual(
+      coordinator.handle(
+        .herdrAgentQueryCompleted(attemptID: 1, phase: .initial, result: .agents([]))
       ),
-      (
-        "foreground cwd can match and original order wins",
-        [
-          HerdrAgent(
-            paneID: "pane-first",
-            agent: "pi",
-            cwd: "/Users/developer",
-            foregroundCwd: "/Users/developer/work/./siglaunch"
-          ),
-          HerdrAgent(
-            paneID: "pane-second",
-            agent: "pi",
-            cwd: workflowConfiguration.workspacePath,
-            foregroundCwd: nil
-          ),
-        ],
-        "pane-first"
-      ),
-    ]
-
-    for testCase in cases {
-      let coordinator = makeCoordinatorQueryingHerdrAgents()
-      XCTAssertEqual(
-        coordinator.handle(.herdrAgentQueryCompleted(.agents(testCase.agents))),
-        [.focusHerdrAgent(paneID: testCase.paneID)],
-        testCase.name
-      )
-    }
+      []
+    )
   }
 
-  func testHerdrQueryWithoutMatchingAgentStartsConfiguredPiInWorkspace() {
-    let coordinator = makeCoordinatorQueryingHerdrAgents()
-    let agents = [
-      HerdrAgent(
-        paneID: "pane-nonmatching-pi",
-        agent: "pi",
-        cwd: "/Users/developer/work/another-workspace",
-        foregroundCwd: nil
+  func testInitialHerdrUnavailableContinuesIntoColdStart() {
+    let coordinator = makeWorkflowReadyCoordinator()
+    XCTAssertEqual(
+      coordinator.handle(.primaryWorkflowRequested),
+      [.queryHerdrAgents(attemptID: 1, phase: .initial)]
+    )
+    XCTAssertEqual(
+      coordinator.handle(
+        .herdrAgentQueryCompleted(attemptID: 1, phase: .initial, result: .herdrUnavailable)
       ),
+      [.loadWorkflowConfiguration]
+    )
+  }
+
+  func testInitialQueryPreservesAnyExactPiAgentWithoutWorkspaceMatching() {
+    let coordinator = makeWorkflowReadyCoordinator()
+    XCTAssertEqual(
+      coordinator.handle(.primaryWorkflowRequested),
+      [.queryHerdrAgents(attemptID: 1, phase: .initial)]
+    )
+
+    let agents = [
       HerdrAgent(
         paneID: "pane-matching-codex",
         agent: "codex",
         cwd: workflowConfiguration.workspacePath,
+        foregroundCwd: workflowConfiguration.workspacePath
+      ),
+      HerdrAgent(
+        paneID: "pane-uppercase-pi",
+        agent: "Pi",
+        cwd: workflowConfiguration.workspacePath,
         foregroundCwd: nil
+      ),
+      HerdrAgent(
+        paneID: "pane-other-workspace",
+        agent: "pi",
+        cwd: "/Users/developer/work/llm-abm-marketing-sim",
+        foregroundCwd: "/Users/developer"
       ),
     ]
 
     XCTAssertEqual(
-      coordinator.handle(.herdrAgentQueryCompleted(.agents(agents))),
-      [
-        .startPiAgent(
-          workspacePath: workflowConfiguration.workspacePath,
-          command: workflowConfiguration.piCommand
-        )
-      ]
+      coordinator.handle(
+        .herdrAgentQueryCompleted(attemptID: 1, phase: .initial, result: .agents(agents))
+      ),
+      [.primaryWorkflowPiAgentPreserved]
     )
-    XCTAssertEqual(coordinator.handle(.herdrAgentQueryCompleted(.agents([]))), [])
+    XCTAssertEqual(
+      coordinator.handle(
+        .herdrAgentQueryCompleted(attemptID: 1, phase: .initial, result: .agents([]))
+      ),
+      []
+    )
+    XCTAssertEqual(
+      coordinator.handle(.workflowConfigurationLoadCompleted(.loaded(workflowConfiguration))),
+      []
+    )
+  }
+
+  func testPostBootstrapQueryPreservesAnyExactPiAgentWithoutFocusing() {
+    let coordinator = makeCoordinatorQueryingHerdrAgents()
+    let agent = HerdrAgent(
+      paneID: "pane-other-workspace",
+      agent: "pi",
+      cwd: "/Users/developer/work/llm-abm-marketing-sim",
+      foregroundCwd: nil
+    )
+
+    XCTAssertEqual(
+      coordinator.handle(
+        .herdrAgentQueryCompleted(
+          attemptID: 1,
+          phase: .postBootstrap,
+          result: .agents([agent])
+        )
+      ),
+      [.primaryWorkflowPiAgentPreserved]
+    )
+    XCTAssertEqual(coordinator.handle(.herdrAgentStartCompleted(.succeeded)), [])
+    XCTAssertEqual(
+      coordinator.handle(
+        .herdrAgentQueryCompleted(attemptID: 1, phase: .postBootstrap, result: .agents([]))
+      ),
+      []
+    )
+  }
+
+  func testPostBootstrapQueryStartsConfiguredPiOnlyWithoutAnExactPiAgent() {
+    let agentSnapshots = [
+      [
+        HerdrAgent(
+          paneID: "pane-matching-codex",
+          agent: "codex",
+          cwd: workflowConfiguration.workspacePath,
+          foregroundCwd: workflowConfiguration.workspacePath
+        ),
+        HerdrAgent(
+          paneID: "pane-uppercase-pi",
+          agent: "Pi",
+          cwd: workflowConfiguration.workspacePath,
+          foregroundCwd: nil
+        ),
+      ],
+      [],
+    ]
+
+    for agents in agentSnapshots {
+      let coordinator = makeCoordinatorQueryingHerdrAgents()
+      XCTAssertEqual(
+        coordinator.handle(
+          .herdrAgentQueryCompleted(
+            attemptID: 1,
+            phase: .postBootstrap,
+            result: .agents(agents)
+          )
+        ),
+        [
+          .startPiAgent(
+            workspacePath: workflowConfiguration.workspacePath,
+            command: workflowConfiguration.piCommand
+          )
+        ]
+      )
+      XCTAssertEqual(
+        coordinator.handle(
+          .herdrAgentQueryCompleted(attemptID: 1, phase: .postBootstrap, result: .agents([]))
+        ),
+        []
+      )
+    }
   }
 
   func testPiStartSuccessCompletesWorkflowOnce() {
     let coordinator = makeCoordinatorQueryingHerdrAgents()
-    _ = coordinator.handle(.herdrAgentQueryCompleted(.agents([])))
+    _ = coordinator.handle(
+      .herdrAgentQueryCompleted(attemptID: 1, phase: .postBootstrap, result: .agents([]))
+    )
 
     XCTAssertEqual(
       coordinator.handle(.herdrAgentStartCompleted(.succeeded)),
@@ -1208,7 +1281,9 @@ final class LaunchCoordinatorTests: XCTestCase {
 
   func testPiStartFailureStopsWorkflowUntilANewTrigger() {
     let coordinator = makeCoordinatorQueryingHerdrAgents()
-    _ = coordinator.handle(.herdrAgentQueryCompleted(.agents([])))
+    _ = coordinator.handle(
+      .herdrAgentQueryCompleted(attemptID: 1, phase: .postBootstrap, result: .agents([]))
+    )
 
     XCTAssertEqual(
       coordinator.handle(.herdrAgentStartCompleted(.failed)),
@@ -1217,7 +1292,7 @@ final class LaunchCoordinatorTests: XCTestCase {
     XCTAssertEqual(coordinator.handle(.herdrAgentStartCompleted(.succeeded)), [])
     XCTAssertEqual(
       coordinator.handle(.primaryWorkflowRequested),
-      [.loadWorkflowConfiguration]
+      [.queryHerdrAgents(attemptID: 2, phase: .initial)]
     )
   }
 
@@ -1230,62 +1305,255 @@ final class LaunchCoordinatorTests: XCTestCase {
     for testCase in cases {
       let coordinator = makeCoordinatorQueryingHerdrAgents()
       XCTAssertEqual(
-        coordinator.handle(.herdrAgentQueryCompleted(testCase.queryResult)),
+        coordinator.handle(
+          .herdrAgentQueryCompleted(
+            attemptID: 1,
+            phase: .postBootstrap,
+            result: testCase.queryResult
+          )
+        ),
         [.primaryWorkflowFailed(testCase.failure)]
       )
       XCTAssertEqual(
-        coordinator.handle(.herdrAgentQueryCompleted(.agents([]))),
+        coordinator.handle(
+          .herdrAgentQueryCompleted(
+            attemptID: 1,
+            phase: .postBootstrap,
+            result: .agents([])
+          )
+        ),
         [],
         "query failure must terminate the current Workflow: \(testCase.queryResult)"
       )
     }
   }
 
-  func testLeadingPiAgentFocusSuccessCompletesWorkflowOnce() {
-    let coordinator = makeCoordinatorQueryingHerdrAgents()
-    let agent = HerdrAgent(
-      paneID: "pane-leading-pi",
+  func testQueryCompletionsCannotCrossInitialAndPostBootstrapPhases() {
+    let coordinator = makeWorkflowReadyCoordinator()
+    let piAgent = HerdrAgent(
+      paneID: "pane-pi",
       agent: "pi",
-      cwd: workflowConfiguration.workspacePath,
+      cwd: "/Users/developer/work/other",
       foregroundCwd: nil
-    )
-    XCTAssertEqual(
-      coordinator.handle(.herdrAgentQueryCompleted(.agents([agent]))),
-      [.focusHerdrAgent(paneID: agent.paneID)]
     )
 
     XCTAssertEqual(
-      coordinator.handle(.herdrAgentFocusCompleted(.succeeded)),
+      coordinator.handle(.primaryWorkflowRequested),
+      [.queryHerdrAgents(attemptID: 1, phase: .initial)]
+    )
+    XCTAssertEqual(
+      coordinator.handle(
+        .herdrAgentQueryCompleted(
+          attemptID: 1,
+          phase: .postBootstrap,
+          result: .agents([piAgent])
+        )
+      ),
+      []
+    )
+    XCTAssertEqual(
+      coordinator.handle(
+        .herdrAgentQueryCompleted(attemptID: 1, phase: .initial, result: .agents([]))
+      ),
+      [.loadWorkflowConfiguration]
+    )
+    XCTAssertEqual(
+      coordinator.handle(
+        .workflowConfigurationLoadCompleted(.loaded(workflowConfiguration))
+      ),
+      [.resolveGhostty]
+    )
+    XCTAssertEqual(
+      coordinator.handle(
+        .ghosttyResolutionCompleted(
+          .found(
+            GhosttyApplication(
+              path: "/Applications/Ghostty.app",
+              version: "1.3.0",
+              isRunning: true
+            )
+          )
+        )
+      ),
+      [.ensureDefaultHerdrSession]
+    )
+    XCTAssertEqual(
+      coordinator.handle(.defaultHerdrSessionEnsureCompleted(.ready(.reused))),
+      [.queryHerdrAgents(attemptID: 1, phase: .postBootstrap)]
+    )
+    XCTAssertEqual(
+      coordinator.handle(
+        .herdrAgentQueryCompleted(attemptID: 1, phase: .initial, result: .agents([piAgent]))
+      ),
+      []
+    )
+    XCTAssertEqual(
+      coordinator.handle(
+        .herdrAgentQueryCompleted(attemptID: 1, phase: .postBootstrap, result: .agents([]))
+      ),
       [
-        .primaryWorkflowLeadingPiAgentFocused(
-          LeadingPiAgentContext(
-            workflow: PrimaryWorkflowContext(
-              configuration: workflowConfiguration,
-              defaultHerdrSession: .reused
-            ),
-            agent: agent
+        .startPiAgent(
+          workspacePath: workflowConfiguration.workspacePath,
+          command: workflowConfiguration.piCommand
+        )
+      ]
+    )
+  }
+
+  func testLateInitialQueryFromCompletedAttemptCannotAdvanceANewAttempt() {
+    let coordinator = makeWorkflowReadyCoordinator()
+    let firstAttempt: PrimaryWorkflowAttemptID = 1
+    let secondAttempt: PrimaryWorkflowAttemptID = 2
+    let stalePiAgent = HerdrAgent(
+      paneID: "pane-stale-pi",
+      agent: "pi",
+      cwd: "/Users/developer/work/other",
+      foregroundCwd: nil
+    )
+
+    XCTAssertEqual(
+      coordinator.handle(.primaryWorkflowRequested),
+      [.queryHerdrAgents(attemptID: firstAttempt, phase: .initial)]
+    )
+    XCTAssertEqual(
+      coordinator.handle(
+        .herdrAgentQueryCompleted(
+          attemptID: firstAttempt,
+          phase: .initial,
+          result: .malformedOutput
+        )
+      ),
+      [.primaryWorkflowFailed(.malformedHerdrOutput)]
+    )
+    XCTAssertEqual(
+      coordinator.handle(.primaryWorkflowRequested),
+      [.queryHerdrAgents(attemptID: secondAttempt, phase: .initial)]
+    )
+    XCTAssertEqual(
+      coordinator.handle(
+        .herdrAgentQueryCompleted(
+          attemptID: firstAttempt,
+          phase: .initial,
+          result: .agents([stalePiAgent])
+        )
+      ),
+      []
+    )
+    XCTAssertEqual(
+      coordinator.handle(
+        .herdrAgentQueryCompleted(
+          attemptID: secondAttempt,
+          phase: .initial,
+          result: .agents([])
+        )
+      ),
+      [.loadWorkflowConfiguration]
+    )
+  }
+
+  func testPrimaryWorkflowRejectsRepeatedAndLateCompletions() {
+    let coordinator = makeWorkflowReadyCoordinator()
+    let configuration = workflowConfiguration
+    let ghostty = GhosttyApplication(
+      path: "/Applications/Ghostty.app",
+      version: "1.3.0",
+      isRunning: false
+    )
+    let initialNonPiResult = HerdrAgentQueryResult.agents([
+      HerdrAgent(
+        paneID: "pane-codex",
+        agent: "codex",
+        cwd: configuration.workspacePath,
+        foregroundCwd: nil
+      )
+    ])
+
+    XCTAssertEqual(
+      coordinator.handle(.primaryWorkflowRequested),
+      [.queryHerdrAgents(attemptID: 1, phase: .initial)]
+    )
+    XCTAssertEqual(
+      coordinator.handle(
+        .herdrAgentQueryCompleted(attemptID: 1, phase: .initial, result: initialNonPiResult)
+      ),
+      [.loadWorkflowConfiguration]
+    )
+    XCTAssertEqual(
+      coordinator.handle(
+        .herdrAgentQueryCompleted(attemptID: 1, phase: .initial, result: initialNonPiResult)
+      ),
+      []
+    )
+    XCTAssertEqual(
+      coordinator.handle(.workflowConfigurationLoadCompleted(.loaded(configuration))),
+      [.resolveGhostty]
+    )
+    XCTAssertEqual(
+      coordinator.handle(.workflowConfigurationLoadCompleted(.loaded(configuration))),
+      []
+    )
+    XCTAssertEqual(
+      coordinator.handle(.ghosttyResolutionCompleted(.found(ghostty))),
+      [.launchGhostty(at: ghostty.path)]
+    )
+    XCTAssertEqual(
+      coordinator.handle(.ghosttyResolutionCompleted(.found(ghostty))),
+      []
+    )
+    XCTAssertEqual(
+      coordinator.handle(.ghosttyLaunchCompleted(.succeeded)),
+      [.ensureDefaultHerdrSession]
+    )
+    XCTAssertEqual(coordinator.handle(.ghosttyLaunchCompleted(.succeeded)), [])
+    XCTAssertEqual(
+      coordinator.handle(.defaultHerdrSessionEnsureCompleted(.ready(.started))),
+      [.queryHerdrAgents(attemptID: 1, phase: .postBootstrap)]
+    )
+    XCTAssertEqual(
+      coordinator.handle(.defaultHerdrSessionEnsureCompleted(.ready(.started))),
+      []
+    )
+    XCTAssertEqual(
+      coordinator.handle(
+        .herdrAgentQueryCompleted(attemptID: 1, phase: .postBootstrap, result: .agents([]))
+      ),
+      [
+        .startPiAgent(
+          workspacePath: configuration.workspacePath,
+          command: configuration.piCommand
+        )
+      ]
+    )
+    XCTAssertEqual(
+      coordinator.handle(
+        .herdrAgentQueryCompleted(attemptID: 1, phase: .postBootstrap, result: .agents([]))
+      ),
+      []
+    )
+    XCTAssertEqual(
+      coordinator.handle(.herdrAgentStartCompleted(.succeeded)),
+      [
+        .primaryWorkflowPiAgentStarted(
+          PrimaryWorkflowContext(
+            configuration: configuration,
+            defaultHerdrSession: .started
           )
         )
       ]
     )
-    XCTAssertEqual(coordinator.handle(.herdrAgentFocusCompleted(.succeeded)), [])
-  }
 
-  func testLeadingPiAgentFocusFailureStopsWorkflow() {
-    let coordinator = makeCoordinatorQueryingHerdrAgents()
-    let agent = HerdrAgent(
-      paneID: "pane-leading-pi",
-      agent: "pi",
-      cwd: workflowConfiguration.workspacePath,
-      foregroundCwd: nil
-    )
-    _ = coordinator.handle(.herdrAgentQueryCompleted(.agents([agent])))
-
-    XCTAssertEqual(
-      coordinator.handle(.herdrAgentFocusCompleted(.failed)),
-      [.primaryWorkflowFailed(.herdrUnavailable)]
-    )
-    XCTAssertEqual(coordinator.handle(.herdrAgentFocusCompleted(.succeeded)), [])
+    let lateEvents: [AppEvent] = [
+      .herdrAgentQueryCompleted(attemptID: 1, phase: .initial, result: initialNonPiResult),
+      .workflowConfigurationLoadCompleted(.loaded(configuration)),
+      .ghosttyResolutionCompleted(.found(ghostty)),
+      .ghosttyLaunchCompleted(.succeeded),
+      .defaultHerdrSessionEnsureCompleted(.ready(.started)),
+      .herdrAgentQueryCompleted(attemptID: 1, phase: .postBootstrap, result: .agents([])),
+      .herdrAgentStartCompleted(.succeeded),
+    ]
+    for event in lateEvents {
+      XCTAssertEqual(coordinator.handle(event), [], "late event: \(event)")
+    }
   }
 
   func testPrimaryWorkflowConfigurationFailuresStopBeforeGhosttyResolution() {
@@ -1301,6 +1569,12 @@ final class LaunchCoordinatorTests: XCTestCase {
       let coordinator = makeWorkflowReadyCoordinator()
       XCTAssertEqual(
         coordinator.handle(.primaryWorkflowRequested),
+        [.queryHerdrAgents(attemptID: 1, phase: .initial)]
+      )
+      XCTAssertEqual(
+        coordinator.handle(
+          .herdrAgentQueryCompleted(attemptID: 1, phase: .initial, result: .agents([]))
+        ),
         [.loadWorkflowConfiguration]
       )
       XCTAssertEqual(
@@ -1345,7 +1619,7 @@ final class LaunchCoordinatorTests: XCTestCase {
       (
         "the existing default Herdr Session is reused before querying Agents",
         .defaultHerdrSessionEnsureCompleted(.ready(.reused)),
-        [.queryHerdrAgents]
+        [.queryHerdrAgents(attemptID: 1, phase: .postBootstrap)]
       ),
     ]
 
@@ -1662,6 +1936,9 @@ final class LaunchCoordinatorTests: XCTestCase {
   private func makeCoordinatorResolvingGhostty() -> LaunchCoordinator {
     let coordinator = makeWorkflowReadyCoordinator()
     _ = coordinator.handle(.primaryWorkflowRequested)
+    _ = coordinator.handle(
+      .herdrAgentQueryCompleted(attemptID: 1, phase: .initial, result: .agents([]))
+    )
     _ = coordinator.handle(
       .workflowConfigurationLoadCompleted(.loaded(workflowConfiguration))
     )

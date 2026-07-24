@@ -386,6 +386,9 @@ final class RecognitionDiagnosticsTests: XCTestCase {
       firstSuccess.contains(.presentDomainExpansionHUD(.showDomainExpansion))
     )
     _ = coordinator.handle(
+      .herdrAgentQueryCompleted(attemptID: 1, phase: .initial, result: .agents([]))
+    )
+    _ = coordinator.handle(
       .workflowConfigurationLoadCompleted(.failed(.unavailable))
     )
     _ = coordinator.handle(.domainExpansionHUD(.animationCompleted))
@@ -429,6 +432,9 @@ final class RecognitionDiagnosticsTests: XCTestCase {
       firstSuccess.contains(.presentDomainExpansionHUD(.showDomainExpansion))
     )
     _ = coordinator.handle(
+      .herdrAgentQueryCompleted(attemptID: 1, phase: .initial, result: .agents([]))
+    )
+    _ = coordinator.handle(
       .workflowConfigurationLoadCompleted(.failed(.unavailable))
     )
     _ = coordinator.handle(.domainExpansionHUD(.animationCompleted))
@@ -453,7 +459,9 @@ final class RecognitionDiagnosticsTests: XCTestCase {
         lifecycleID: 2,
         with: coordinator
       )
-      XCTAssertFalse(effects.contains(.loadWorkflowConfiguration))
+      XCTAssertFalse(
+        containsPrimaryWorkflowQuery(in: effects)
+      )
       XCTAssertFalse(
         effects.contains(.presentDomainExpansionHUD(.showDomainExpansion))
       )
@@ -478,7 +486,9 @@ final class RecognitionDiagnosticsTests: XCTestCase {
         lifecycleID: 3,
         with: coordinator
       )
-      XCTAssertFalse(effects.contains(.loadWorkflowConfiguration))
+      XCTAssertFalse(
+        containsPrimaryWorkflowQuery(in: effects)
+      )
       XCTAssertFalse(
         effects.contains(.presentDomainExpansionHUD(.showDomainExpansion))
       )
@@ -509,7 +519,9 @@ final class RecognitionDiagnosticsTests: XCTestCase {
     XCTAssertTrue(
       secondSuccess.contains(.presentDomainExpansionHUD(.showDomainExpansion))
     )
-    XCTAssertTrue(secondSuccess.contains(.loadWorkflowConfiguration))
+    XCTAssertTrue(
+      secondSuccess.contains(.queryHerdrAgents(attemptID: 2, phase: .initial))
+    )
   }
 
   func testDiagnosticsUsesIndependentEvidenceWithoutRecognitionSuccess() {
@@ -558,7 +570,9 @@ final class RecognitionDiagnosticsTests: XCTestCase {
         }
       )
       XCTAssertFalse(effects.contains(.presentDomainExpansionHUD(.showDomainExpansion)))
-      XCTAssertFalse(effects.contains(.loadWorkflowConfiguration))
+      XCTAssertFalse(
+        containsPrimaryWorkflowQuery(in: effects)
+      )
     }
     XCTAssertEqual(
       diagnosticsFrames.map(\.poseMatchCount),
@@ -659,7 +673,9 @@ final class RecognitionDiagnosticsTests: XCTestCase {
       XCTAssertNil(diagnostics?.topClassification)
       XCTAssertNil(diagnostics?.isPoseMatch)
       XCTAssertEqual(diagnostics?.poseMatchCount, 1)
-      XCTAssertFalse(effects.contains(.loadWorkflowConfiguration))
+      XCTAssertFalse(
+        containsPrimaryWorkflowQuery(in: effects)
+      )
       XCTAssertFalse(
         effects.contains(.presentDomainExpansionHUD(.showDomainExpansion))
       )
@@ -791,7 +807,9 @@ final class RecognitionDiagnosticsTests: XCTestCase {
         return true
       }
     )
-    XCTAssertFalse(frameEffects.contains(.loadWorkflowConfiguration))
+    XCTAssertFalse(
+      containsPrimaryWorkflowQuery(in: frameEffects)
+    )
     XCTAssertFalse(
       frameEffects.contains(.presentDomainExpansionHUD(.showDomainExpansion))
     )
@@ -1138,7 +1156,9 @@ final class RecognitionDiagnosticsTests: XCTestCase {
     XCTAssertTrue(
       success.contains(.presentDomainExpansionHUD(.showDomainExpansion))
     )
-    XCTAssertTrue(success.contains(.loadWorkflowConfiguration))
+    XCTAssertTrue(
+      success.contains(.queryHerdrAgents(attemptID: 1, phase: .initial))
+    )
   }
 
   private func completeClassifiedFrame(
@@ -1205,6 +1225,15 @@ final class RecognitionDiagnosticsTests: XCTestCase {
       samples: samples,
       summary: summary
     )!
+  }
+
+  private func containsPrimaryWorkflowQuery(in effects: Effects) -> Bool {
+    effects.contains { effect in
+      if case .queryHerdrAgents = effect {
+        return true
+      }
+      return false
+    }
   }
 
   private func diagnosticsFrame(

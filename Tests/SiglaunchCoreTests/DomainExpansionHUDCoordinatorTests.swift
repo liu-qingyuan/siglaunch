@@ -18,12 +18,24 @@ final class DomainExpansionHUDCoordinatorTests: XCTestCase {
     )
   }
 
-  func testWorkflowSuccessBeforeAnimationCompletionOnlyFadesAfterAnimation() {
-    let coordinator = makeTriggeredCoordinator()
+  func testPreservedPiAgentSuccessBeforeAnimationOnlyFadesAfterAnimation() {
+    let coordinator = makeTriggeredCoordinator(initialQueryResult: nil)
+    let existingAgent = HerdrAgent(
+      paneID: "pane-existing-pi",
+      agent: "pi",
+      cwd: "/Users/developer/work/llm-abm-marketing-sim",
+      foregroundCwd: nil
+    )
 
     XCTAssertEqual(
-      completeSuccessfulPiStart(with: coordinator),
-      [.primaryWorkflowPiAgentStarted(successfulWorkflowContext)]
+      coordinator.handle(
+        .herdrAgentQueryCompleted(
+          attemptID: 1,
+          phase: .initial,
+          result: .agents([existingAgent])
+        )
+      ),
+      [.primaryWorkflowPiAgentPreserved]
     )
     XCTAssertEqual(
       coordinator.handle(.domainExpansionHUD(.animationCompleted)),
@@ -170,13 +182,23 @@ final class DomainExpansionHUDCoordinatorTests: XCTestCase {
       ),
       (
         "Herdr Agent output",
-        readyForHerdr + [.herdrAgentQueryCompleted(.malformedOutput)],
+        readyForHerdr + [
+          .herdrAgentQueryCompleted(
+            attemptID: 1,
+            phase: .postBootstrap,
+            result: .malformedOutput
+          )
+        ],
         .malformedHerdrOutput
       ),
       (
         "Pi Agent start",
         readyForHerdr + [
-          .herdrAgentQueryCompleted(.agents([])),
+          .herdrAgentQueryCompleted(
+            attemptID: 1,
+            phase: .postBootstrap,
+            result: .agents([])
+          ),
           .herdrAgentStartCompleted(.failed),
         ],
         .piStartFailed
@@ -299,11 +321,19 @@ final class DomainExpansionHUDCoordinatorTests: XCTestCase {
     _ = coordinator.handle(
       .defaultHerdrSessionEnsureCompleted(.ready(.reused))
     )
-    _ = coordinator.handle(.herdrAgentQueryCompleted(.agents([])))
+    _ = coordinator.handle(
+      .herdrAgentQueryCompleted(
+        attemptID: 1,
+        phase: .postBootstrap,
+        result: .agents([])
+      )
+    )
     return coordinator.handle(.herdrAgentStartCompleted(.succeeded))
   }
 
-  private func makeTriggeredCoordinator() -> LaunchCoordinator {
+  private func makeTriggeredCoordinator(
+    initialQueryResult: HerdrAgentQueryResult? = .agents([])
+  ) -> LaunchCoordinator {
     let coordinator = LaunchCoordinator()
     for event in [
       AppEvent.appLaunched,
@@ -347,6 +377,15 @@ final class DomainExpansionHUDCoordinatorTests: XCTestCase {
               ]
             )
           )
+        )
+      )
+    }
+    if let initialQueryResult {
+      _ = coordinator.handle(
+        .herdrAgentQueryCompleted(
+          attemptID: 1,
+          phase: .initial,
+          result: initialQueryResult
         )
       )
     }
