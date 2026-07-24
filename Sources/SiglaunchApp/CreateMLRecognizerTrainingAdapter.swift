@@ -142,7 +142,7 @@ final class CreateMLRecognizerTrainingAdapter: RecognizerTrainingAdapting {
   nonisolated static func stratifiedSplit(
     _ input: PoseDatasetTrainingInput,
     trainingProportion: Double = 0.8,
-    seed: Int = 0
+    seed: Int = 8
   ) throws -> RecognizerTrainingSplit {
     guard trainingProportion > 0, trainingProportion < 1 else {
       throw RecognizerTrainingSplitError.invalidProportion

@@ -37,6 +37,18 @@ final class RecognizerTrainingAdapterTests: XCTestCase {
     }
   }
 
+  func testDefaultStratifiedSplitUsesStableSeedEight() throws {
+    let input = makeTrainingInput(samplesPerLabel: 20)
+
+    let actual = try CreateMLRecognizerTrainingAdapter.stratifiedSplit(input)
+    let expected = try CreateMLRecognizerTrainingAdapter.stratifiedSplit(input, seed: 8)
+
+    for label in PoseDatasetLabel.allCases {
+      XCTAssertEqual(actual.training[label], expected.training[label])
+      XCTAssertEqual(actual.validation[label], expected.validation[label])
+    }
+  }
+
   @MainActor
   func testTrainingUsesGeneralizationAugmentationsWithoutChangingHandedness() throws {
     let workspace = try CreateMLTestWorkspace()
